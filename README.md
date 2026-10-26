@@ -9,3 +9,5 @@
 玫瑰星云，永不凋零   
 
 黄霄雲姐姐，我喜欢你（哭）
+
+Thanks to the HeyPuter/everything project and its contributors for openly sharing the results and concepts behind their software development; these have served as an inspiration for the explorations at OKK STUDIO. We also appreciate your contributions to the open-source community.
