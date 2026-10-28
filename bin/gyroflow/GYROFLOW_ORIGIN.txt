@@ -1,0 +1,5 @@
+Official Gyroflow v1.6.3 Windows x64 portable distribution
+Download: https://github.com/gyroflow/gyroflow/releases/tag/v1.6.3
+Source: https://github.com/gyroflow/gyroflow/tree/v1.6.3
+Archive SHA256: 37ef4064adb6991ae2251e283e5888a02ea00024d0a6f1353501892bb5367e21
+Gyroflow is an independent external application. Original archive contents and license are preserved.
