@@ -84,6 +84,7 @@ class GpuLiveSession:
             return self.compose(**{key:value for key,value in payload.items() if key not in ('op','request_id')})
         if op=='resize':return self.resize(payload['width'],payload['height'])
         if op=='set_visible':return self.set_visible(payload['visible'])
+        if op=='wake':return self.wake()
         if op=='screenshot':return self.screenshot(payload['path'],timeout=timeout)
         if op=='quit':return self.close()
         raise ValueError('Unsupported GPU operation: '+str(op))
@@ -143,6 +144,11 @@ class GpuLiveSession:
         if type(visible) is not bool:raise ValueError('GPU visibility must be a boolean')
         self._healthy()
         with self._lock:self._visible=visible
+        self._wake.set()
+
+    def wake(self):
+        """Re-present retained textures after foreground activation."""
+        self._healthy()
         self._wake.set()
 
     def screenshot(self,path,timeout=3.):

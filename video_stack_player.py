@@ -15,6 +15,7 @@ class VideoStackPlayerMixin:
         self._stack_preview = None
         self._stack_revision = 0
         self._stack_job_key = None
+        self._stack_was_playing = False
 
     def take_stack_frame(self):
         preview = getattr(self, '_stack_preview', None)
@@ -82,11 +83,26 @@ class VideoStackPlayerMixin:
             self._stack_preview = StackPreview(ffmpeg, ffprobe, self._emit)
         preview = self._stack_preview
         preview.update_clock(self._position)
-        key = (self._stack_revision, self._active_navigation_serial, self._playing)
-        if key != self._stack_job_key:
+        key = (self._stack_revision, self._active_navigation_serial)
+        resumable = preview.set_playing(self._playing)
+        starting = self._playing and not self._stack_was_playing
+        self._stack_was_playing = self._playing
+        if key != self._stack_job_key or (starting and not resumable):
             if self._stack_job_key is not None and key[0] != self._stack_job_key[0]: preview.cancel()
             self._stack_job_key = key
             preview.request(self._stack_project(), self._position, self._playing, self._request_id,
                             ass_path=self._subtitle_ass_path or None, use_proxies=self._use_proxies,
                             preview_epoch=getattr(self, '_active_preview_epoch', None))
             self._emit('status', '透明图层实时预览 · 720p · CPU 合成 · 最高 30fps')
+
+    def _resync_stack_preview(self, position):
+        preview = self._stack_preview
+        if preview is None: return
+        if preview.refresh_presentation(position, self._playing):
+            # Only stale decode work is replaced. Reuse this preview owner,
+            # its source probes/proxy cache, and the separate master audio.
+            preview.request(self._stack_project(), position, self._playing, self._request_id,
+                ass_path=self._subtitle_ass_path or None, use_proxies=self._use_proxies,
+                preview_epoch=None)
+            self._stack_job_key = (self._stack_revision, self._active_navigation_serial)
+            self._stack_was_playing = self._playing

@@ -1,12 +1,13 @@
 """Bounded, cancellable live RGBA preview using the export compositor graph.
 
-One FFmpeg process streams the current continuous segment. No timeline-length
+Two bounded FFmpeg slots stream the current segment and prepare its successor. No timeline-length
 cache is generated. The caller owns audio/time; decoded video follows that
 clock and a single latest-frame mailbox, never a queue of image buffers.
 """
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import ExitStack, contextmanager
 from fractions import Fraction
 import json
 import math
@@ -24,6 +25,13 @@ from proxy_media import PreviewProxyResolver, validate_proxy_media
 
 class PreviewCancelled(Exception):
     pass
+
+
+class PreviewCatchUp(Exception):
+    """Replace only a stale continuous decoder, keeping its preview owner."""
+    def __init__(self, position):
+        super().__init__('continuous preview fell behind the master clock')
+        self.position = position
 
 
 def preview_segments(project, position, *, single_frame=False):
@@ -69,7 +77,9 @@ def preview_command(segment, project, ffmpeg, media, width=1280, height=720,
 
 
 class StackPreview:
-    """Own a worker and at most one FFmpeg/ffprobe process and one RGBA frame."""
+    """Own current/next FFmpeg processes and a single latest RGBA mailbox."""
+    CATCHUP_LAG = .5
+    CATCHUP_INTERVAL = 2.5
     def __init__(self, ffmpeg, ffprobe, notify, *, width=1280, height=720, max_fps=30.):
         self.ffmpeg, self.ffprobe, self.notify = str(ffmpeg), str(ffprobe), notify
         self.width, self.height, self.max_fps = width, height, max_fps
@@ -78,11 +88,19 @@ class StackPreview:
         self._cancel = threading.Event()
         self._closed = False
         self._process = None
+        self._processes = set()
         self._latest = None
         self._notified = False
         self._generation = 0
         self._epoch = None
         self._clock = 0.
+        self._playing = False
+        self._stream_generation = None
+        self._decoded_time = None
+        self._decoded_fps = self.max_fps
+        self._last_catchup = time.monotonic()
+        self._catchup_count = 0
+        self._startup_seconds = .1
         self._media = {}
         self._rates = {}
         self._proxies = PreviewProxyResolver()
@@ -92,6 +110,33 @@ class StackPreview:
 
     def update_clock(self, position):
         with self._condition: self._clock = float(position)
+
+    def set_playing(self, playing):
+        """Pause pipe consumption; keep decoder state and its bounded cache."""
+        with self._condition:
+            self._playing = bool(playing)
+            self._condition.notify_all()
+            return self._stream_generation == self._generation
+
+    def refresh_presentation(self, position, playing):
+        """Discard a hidden-window mailbox; report a lagging decode stream.
+
+        A healthy or paused stream keeps both processes and their pipe cache.
+        FFmpeg rawvideo has no interactive seek command, so the caller may
+        restart only a substantially late stream at the current master time.
+        Metadata/proxy caches remain owned by this preview in either case.
+        """
+        with self._condition:
+            self._clock = float(position)
+            self._playing = bool(playing)
+            self._condition.notify_all()
+            if not playing: return False
+            self._latest = None
+            self._notified = False
+            threshold = max(.2, 3./max(1., self._decoded_fps))
+            return (self._stream_generation == self._generation
+                    and self._decoded_time is not None
+                    and position-self._decoded_time > threshold)
 
     def request(self, project, position, playing, request_id, *, ass_path=None, use_proxies=True, preview_epoch=None):
         with self._condition:
@@ -103,6 +148,10 @@ class StackPreview:
                 self._latest = None
             self._epoch = preview_epoch
             self._clock = float(position)
+            self._playing = bool(playing)
+            self._stream_generation = self._generation if playing else None
+            self._decoded_time = None
+            self._last_catchup = time.monotonic()
             self._pending = (self._generation, project, float(position), bool(playing), int(request_id),
                              ass_path, bool(use_proxies), preview_epoch)
             self._condition.notify()
@@ -111,16 +160,27 @@ class StackPreview:
         with self._condition:
             self._generation += 1; self._pending = None; self._latest = None
             self._epoch = None
+            self._stream_generation = None
+            self._decoded_time = None
             self._cancel.set(); self._terminate_locked()
 
     def _terminate_locked(self):
-        if self._process is not None and self._process.poll() is None:
-            try: self._process.terminate()
-            except OSError: pass  # The owning worker always waits/reaps below.
+        for process in tuple(self._processes):
+            if process.poll() is None:
+                try: process.terminate()
+                except OSError: pass  # The owning worker always waits/reaps below.
 
     def take_frame(self):
         with self._condition:
             result = self._latest; self._latest = None; self._notified = False
+            if result is not None and result.get('playback_frame'):
+                clock = self._clock
+                # Tk may have been busy after the worker published this
+                # mailbox. Recheck the decoder's latest master clock when
+                # taking the frame, not an older UI state-event timestamp.
+                if self._playing and result['time'] < clock-1.5/result['fps']:
+                    return None
+                result = {**result, 'master_time': clock, 'playing': self._playing}
             return result
 
     def close(self, timeout=5.):
@@ -129,18 +189,47 @@ class StackPreview:
             self._cancel.set(); self._terminate_locked(); self._condition.notify()
         self._thread.join(timeout)
         if self._thread.is_alive(): raise RuntimeError('图层预览进程尚未退出，请重试释放缓存。')
-        if self._process is not None:
-            self._reap(self._process)
+        if self._processes:
+            errors = []
+            for process in tuple(self._processes):
+                try: self._reap(process)
+                except Exception as error: errors.append(error)
+            if errors: raise errors[0]
             self._shutdown_error = None
         if self._shutdown_error: raise RuntimeError(self._shutdown_error)
 
     def _check(self, cancel):
         if cancel.is_set(): raise PreviewCancelled()
 
+    def _wait_playing(self, cancel):
+        with self._condition:
+            while not self._playing:
+                self._check(cancel)
+                self._condition.wait(.05)
+            self._check(cancel)
+
+    def _catchup_target(self, generation, stamp, fps, duration):
+        with self._condition:
+            if (not self._playing or generation != self._generation
+                    or self._pending is not None or self._cancel.is_set()): return None
+            clock = self._clock
+            if clock-stamp <= max(self.CATCHUP_LAG, 3./fps): return None
+            now = time.monotonic()
+            if now-self._last_catchup < self.CATCHUP_INTERVAL: return None
+            last_frame = max(0., duration-1./fps)
+            if clock >= last_frame: return None
+            self._last_catchup = now
+            # Prepare just ahead by the measured cold-start cost. Seeking
+            # only to "now" can already be late when FFmpeg's first frame
+            # arrives, particularly when composition is close to real time.
+            lead = min(.5, max(1./fps, self._startup_seconds+1./fps))
+            return min(last_frame, clock+lead)
+
     def _spawn(self, command, cancel, **kwargs):
         self._check(cancel)
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW, **kwargs)
         with self._condition:
+            self._processes.add(process)
             self._process = process
             if cancel.is_set(): self._terminate_locked()
         return process
@@ -158,7 +247,24 @@ class StackPreview:
             raise
         else:
             with self._condition:
-                if self._process is process: self._process = None
+                self._processes.discard(process)
+                if self._process is process: self._process = next(iter(self._processes), None)
+
+    @contextmanager
+    def _segment_stream(self, segment, project, media, width, height, playing, ass_path, rates, cancel):
+        command, fps = preview_command(segment, project, self.ffmpeg, media,
+            width, height, single_frame=not playing, max_fps=self.max_fps, ass_path=ass_path,
+            source_frame_rates=rates)
+        with tempfile.TemporaryFile() as error_log, tempfile.TemporaryDirectory(prefix='okk_stack_graph_') as graph_dir:
+            # Script files also keep 36-input filter graphs below Windows'
+            # command-line limit. Their owner stays alive until this process exits.
+            graph_index = command.index('-filter_complex')
+            graph_path = Path(graph_dir)/'preview.ffgraph'
+            graph_path.write_text(command[graph_index+1], encoding='utf-8')
+            command[graph_index:graph_index+2] = ['-/filter_complex', str(graph_path)]
+            process = self._spawn(command, cancel, stdout=subprocess.PIPE, stderr=error_log)
+            try: yield process, fps, error_log
+            finally: self._reap(process)
 
     def _probe(self, path, cancel):
         stat = Path(path).stat(); key = (path, stat.st_size, stat.st_mtime_ns)
@@ -252,54 +358,82 @@ class StackPreview:
         # Alpha identity comes from an actual probe, including old projects.
         # We intentionally use original/full-quality treatment paths, never an
         # opaque H264 preview proxy for a formerly transparent layer.
-        total = 0; began = time.monotonic(); last_status = began
-        for segment in segments:
-            self._check(cancel)
-            command, fps = preview_command(segment, project, self.ffmpeg, media,
-                width, height, single_frame=not playing, max_fps=self.max_fps, ass_path=ass_path,
-                source_frame_rates=rates)
-            with tempfile.TemporaryFile() as error_log, tempfile.TemporaryDirectory(prefix='okk_stack_graph_') as graph_dir:
-                # Even 36 long source paths and their filters must fit Windows'
-                # command line limit. FFmpeg loads the graph from this file.
-                graph_index = command.index('-filter_complex')
-                graph_path = Path(graph_dir)/'preview.ffgraph'
-                graph_path.write_text(command[graph_index+1], encoding='utf-8')
-                command[graph_index:graph_index+2] = ['-/filter_complex', str(graph_path)]
-                # BufferedReader performs the pipe's short reads in C. An
-                # unbuffered Python loop over Windows 4 KiB pipe reads cannot
-                # reliably carry 720p RGBA at 30 fps.
-                process = self._spawn(command, cancel, stdout=subprocess.PIPE, stderr=error_log)
-                try:
-                    frame_bytes = width*height*4; index = 0
-                    while True:
-                        self._check(cancel)
-                        parts = bytearray()
-                        while len(parts) < frame_bytes:
-                            data = process.stdout.read(frame_bytes-len(parts))
-                            if not data: break
-                            parts.extend(data)
-                        self._check(cancel)
-                        if not parts: break
-                        if len(parts) != frame_bytes: raise RuntimeError('图层预览返回了不完整的视频帧。')
-                        stamp = segment.start + index/fps; index += 1; total += 1
-                        if playing:
-                            # Audio remains the master. Never enqueue old frames
-                            # if decoding or the Tk paint loop falls behind.
-                            while True:
-                                with self._condition: clock = self._clock
-                                if stamp <= clock + .5/fps: break
-                                if cancel.wait(.004): raise PreviewCancelled()
-                            if stamp < clock - 1.5/fps:
-                                if time.monotonic()-last_status > 3.:
-                                    self.notify('status', '图层预览解码跟不上播放时钟，正在跳过旧帧；可减少图层或使用保留透明通道的轻量素材。')
-                                    last_status = time.monotonic()
-                                continue
-                        self._publish(generation, {'request_id': request_id, 'time': stamp,
-                            'width': width, 'height': height, 'rgba': bytes(parts), 'preview_epoch': preview_epoch})
-                    process.wait(timeout=3.)
-                    if process.returncode:
-                        error_log.seek(0); raise RuntimeError(error_log.read(8192).decode('utf-8', errors='replace'))
-                finally: self._reap(process)
+        last_status = time.monotonic()
+        iterator = iter(segments)
+        current = following = None
+
+        def prepare(segment):
+            owner = ExitStack()
+            try:
+                process, fps, error_log = owner.enter_context(self._segment_stream(
+                    segment, project, media, width, height, playing, ass_path, rates, cancel))
+                return segment, process, fps, error_log, owner
+            except BaseException:
+                owner.close()
+                raise
+
+        try:
+            segment = next(iterator, None)
+            opened_at = time.monotonic()
+            first_decoded = False
+            if segment is not None: current = prepare(segment)
+            while current is not None:
+                self._check(cancel)
+                segment, process, fps, error_log, owner = current
+                # Start only the immediate successor. Its bounded stdout pipe
+                # fills with the first frame, then backpressure stops decoding.
+                # Nothing reads or queues the rest of its timeline in memory.
+                next_segment = next(iterator, None) if playing else None
+                if next_segment is not None: following = prepare(next_segment)
+                frame_bytes = width*height*4; index = 0
+                while True:
+                    self._check(cancel)
+                    if playing: self._wait_playing(cancel)
+                    parts = bytearray()
+                    while len(parts) < frame_bytes:
+                        data = process.stdout.read(frame_bytes-len(parts))
+                        if not data: break
+                        parts.extend(data)
+                    self._check(cancel)
+                    if not parts: break
+                    if len(parts) != frame_bytes: raise RuntimeError('图层预览返回了不完整的视频帧。')
+                    stamp = segment.start + index/fps; index += 1
+                    with self._condition:
+                        if generation == self._generation:
+                            self._decoded_time, self._decoded_fps = stamp, fps
+                            if not first_decoded:
+                                self._startup_seconds = min(.5, max(0., time.monotonic()-opened_at))
+                    first_decoded = True
+                    if playing:
+                        # Audio remains the master. Never enqueue old frames
+                        # if decoding or the Tk paint loop falls behind.
+                        while True:
+                            self._wait_playing(cancel)
+                            with self._condition: clock = self._clock
+                            if stamp <= clock + .5/fps: break
+                            if cancel.wait(.004): raise PreviewCancelled()
+                        if stamp < clock - 1.5/fps:
+                            target = self._catchup_target(generation, stamp, fps, project.duration)
+                            if target is not None: raise PreviewCatchUp(target)
+                            if time.monotonic()-last_status > 3.:
+                                self.notify('status', '图层预览解码跟不上播放时钟，正在跳过旧帧；可减少图层或使用保留透明通道的轻量素材。')
+                                last_status = time.monotonic()
+                            continue
+                    self._publish(generation, {'request_id': request_id, 'time': stamp,
+                        'width': width, 'height': height, 'rgba': bytes(parts), 'preview_epoch': preview_epoch,
+                        'fps': fps, 'playback_frame': playing})
+                process.wait(timeout=3.)
+                if process.returncode:
+                    error_log.seek(0); raise RuntimeError(error_log.read(8192).decode('utf-8', errors='replace'))
+                owner.close()
+                current, following = following, None
+        finally:
+            # Cancellation, navigation, cache unloading and failed successor
+            # startup must reap both slots, even if one cleanup raises.
+            try:
+                if current is not None: current[4].close()
+            finally:
+                if following is not None: following[4].close()
 
     def _run(self):
         while True:
@@ -310,8 +444,25 @@ class StackPreview:
                 cancel = self._cancel = threading.Event()
             try: self._render(job, cancel)
             except PreviewCancelled: pass
+            except PreviewCatchUp as recovery:
+                with self._condition:
+                    if (not self._closed and not cancel.is_set() and self._playing
+                            and job[0] == self._generation and self._pending is None):
+                        self._latest = None
+                        self._notified = False
+                        self._decoded_time = None
+                        self._catchup_count += 1
+                        self._pending = (job[0], job[1], recovery.position, True, *job[4:])
+                        recovered = True
+                    else: recovered = False
+                if recovered:
+                    self.notify('status', '图层实时合成持续落后，已跳过旧画面追上播放时钟；缓存保持有界，复杂图层可能无法满帧播放。')
             except Exception as error:
                 if not cancel.is_set(): self.notify('error', f'透明图层预览失败：{error}')
                 if self._shutdown_error:
                     with self._condition: self._closed = True
                     return  # Keep the failed process owner for explicit close retries.
+            finally:
+                with self._condition:
+                    if self._stream_generation == job[0] and self._pending is None:
+                        self._stream_generation = None

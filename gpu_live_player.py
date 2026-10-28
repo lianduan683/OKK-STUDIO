@@ -341,6 +341,7 @@ class GpuLivePlayerMixin:
         grades = () if self._is_baked_key(side.asset_key) else self._program_grade_chain(camera, position)
         if not self._gpu_ensure_side(target, side, position, force=force, grades=grades): return
         if self._gpu_navigation_pending(): return
+        position = self._clock() if self._playing and not force else self._position
         self._gpu_compose(target, position=position)
         if target is not current:
             self._program, self._program_standby = target, current

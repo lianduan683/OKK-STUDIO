@@ -16,9 +16,9 @@ def stream_has_alpha(stream):
 
 
 def ordered_cameras(project, *, include_hidden=False):
-    available = set(project.cameras)
+    available = set(project.timeline_cameras)
     result = list(dict.fromkeys(camera for camera in project.video_stack_order if camera in available))
-    result.extend(camera for camera in project.cameras if camera not in result)
+    result.extend(camera for camera in project.timeline_cameras if camera not in result)
     if not include_hidden:
         hidden = set(project.video_stack_hidden)
         result = [camera for camera in result if camera not in hidden]
@@ -28,7 +28,12 @@ def ordered_cameras(project, *, include_hidden=False):
 def validate_stack(project):
     if type(project.video_stack_enabled) is not bool:
         raise ValueError('图层叠加开关必须是布尔值')
-    available = set(project.cameras)
+    tracks = project.timeline_empty_tracks
+    if (not isinstance(tracks, list) or len(tracks) > 100000
+            or any(type(camera) is not int or camera < 1 for camera in tracks)
+            or len(set(tracks)) != len(tracks)):
+        raise ValueError('空视频轨道必须是互不重复的正整数列表')
+    available = set(project.timeline_cameras)
     for name, values in (('图层顺序', project.video_stack_order), ('隐藏图层', project.video_stack_hidden)):
         if not isinstance(values, list) or len(values) > 100000:
             raise ValueError(name + '必须是机位列表')
@@ -40,6 +45,6 @@ def validate_stack(project):
 
 def prune_stack(project):
     """Remove deleted camera references after an explicit timeline mutation."""
-    available = set(project.cameras)
+    available = set(project.timeline_cameras)
     project.video_stack_order = list(dict.fromkeys(camera for camera in project.video_stack_order if camera in available))
     project.video_stack_hidden = list(dict.fromkeys(camera for camera in project.video_stack_hidden if camera in available))

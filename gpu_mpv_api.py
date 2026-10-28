@@ -198,7 +198,7 @@ class Core:
         self._thread=None
         configuration={'config':'no','vo':'libmpv','hwdec':'d3d11va','hwdec-software-fallback':'no',
                        'audio':'no','pause':'yes','terminal':'no','keep-open':'yes','idle':'yes',
-                       'cache-on-disk':'no','demuxer-max-bytes':'32MiB',
+                       'cache-on-disk':'no','cache-pause':'no','demuxer-max-bytes':'32MiB',
                        'demuxer-max-back-bytes':'8MiB','demuxer-readahead-secs':'2'}
         configuration.update(options or {})
         try:

@@ -6,6 +6,7 @@ tests or loaded lazily from gpu_live_session in the existing Python process.
 from __future__ import annotations
 
 import hashlib
+from functools import lru_cache
 import math
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import time
 from realtime_grade import grade_uniforms
 
 
+@lru_cache(maxsize=1)
 def grade_layout():
     names = tuple(grade_uniforms(())[0])
     digest = hashlib.sha256('\n'.join(names).encode('utf-8')).hexdigest()
@@ -156,6 +158,9 @@ class GpuLiveSession:
     def set_visible(self, visible):
         if type(visible) is not bool: raise ValueError('GPU 可见状态必须为布尔值。')
         return self.request('set_visible', visible=visible)
+
+    def wake(self):
+        return self.request('wake')
 
     def screenshot(self, path):
         return self.request('screenshot', path=str(Path(path).resolve()))

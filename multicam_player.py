@@ -84,6 +84,8 @@ class _Slot:
     subtitle_id: int | None = None
     last_seek_time: float = float('-inf')
     prewarm_target: tuple | None = None
+    prewarm_running: bool = False
+    prewarm_epoch: float | None = None
     playback_speed: float = 1.0
     last_speed_poll: float = float('-inf')
     navigation_serial: int = -1
@@ -297,21 +299,22 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
         self._subtitle_key: str | None = None
         self._subtitle_ass_path = ""
         self._last_drift = 0.0
+        self._last_presentation_refresh = float('-inf')
         self._thumbnail_cursor = 0
         self._reported: set[str] = set()
         try:
+            next_tick = time.monotonic()
             while not self._closing.is_set():
-                began = time.monotonic()
                 try:
-                    action, kwargs = self._commands.get(timeout=self.TICK)
+                    action, kwargs = self._commands.get(timeout=max(0., next_tick-time.monotonic()))
                     if action == "close":
                         break
                     # Consecutive seeks from a dragged slider do not load stale frames.
                     actions = [(action, kwargs)]
                     while not self._commands.empty():
                         following = self._commands.get_nowait()
-                        if (following[0] in {"seek", "scrub", "grade_preview", "camera_windows", "configure"}
-                                and following[0] == actions[-1][0]
+                        if (following[0] in {"seek", "scrub", "grade_preview", "camera_windows", "configure", "refresh_presentation"}
+                            and following[0] == actions[-1][0]
                                 and (following[0] != 'configure' or
                                      following[1].get('gpu_live') == actions[-1][1].get('gpu_live'))):
                             if following[0] == 'camera_windows':
@@ -350,6 +353,7 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
                     self._pause_all()
                 if self._closing.is_set():
                     break
+                began = time.monotonic()
                 try:
                     if self._project is not None and not self._navigation_pending():
                         self._tick()
@@ -360,10 +364,10 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
                     self._playing = False
                     self._pause_all()
                 self._state()
-                # Queue waits are interruptible; MPV work is never done on Tk's thread.
-                elapsed = time.monotonic() - began
-                if elapsed < self.TICK:
-                    self._closing.wait(self.TICK - elapsed)
+                # Include synchronization work in the frame budget. Waiting a
+                # full TICK again after IPC added its cost to every cut and
+                # also delayed pause/resume commands behind an extra sleep.
+                next_tick = began+self.TICK
         finally:
             self._shutdown_resources()
 
@@ -459,6 +463,8 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
                 self._update_proxy_bindings(values)
             except (ValueError, TypeError, OSError) as exc:
                 self._error('代理自动挂载失败，保留当前预览', exc)
+        elif action == 'refresh_presentation':
+            self._refresh_presentation()
         elif action == "configure":
             position = self._clock() if self._project is not None else 0.0
             self._project = values["project"]
@@ -471,7 +477,7 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
                 # A hidden frame prepared for an older edit is no longer a
                 # readiness marker, even if its decoder can stay allocated.
                 for slot in (self._program, self._program_standby):
-                    if slot is not None and self._is_baked_key(slot.key):
+                    if slot is not None:
                         slot.prewarm_target = None
             self._transition_signature = signature
             self._grade_draft = None
@@ -518,14 +524,16 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
             self._sync()
             self._emit("status", f"转场预览已就绪 · {len(checked)} 处")
         elif action == "program_swap_ack":
-            if values.get("window") == self._awaiting_program_swap:
+            if self._awaiting_program_swap is not None and values.get("window") == self._awaiting_program_swap:
                 self._awaiting_program_swap = None
+                self._park_hidden_picture(self._program_standby)
         elif action in ('resize', 'gpu_resize'):
             if self._gpu_live_enabled:
                 self._gpu_session.resize(values['width'], values['height'])
         elif action == "comparison_swap_ack":
-            if values.get("window") == self._awaiting_comparison_swap:
+            if self._awaiting_comparison_swap is not None and values.get("window") == self._awaiting_comparison_swap:
                 self._awaiting_comparison_swap = None
+                self._park_hidden_picture(self._comparison_standby)
         elif action == "stabilization_compare":
             enabled = values.get('enabled', False)
             if type(enabled) is not bool:
@@ -625,16 +633,25 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
             self._anchor = time.monotonic()
             self._sync(force=True, navigation=True)
         elif action == "play" and self._project is not None:
-            if self._position >= self._duration():
+            restart = self._position >= self._duration()
+            if restart:
                 self._position = 0.0
             self._anchor = time.monotonic()
             self._playing = True
-            self._sync(force=True)
+            if not restart:
+                if self._audio_seek_pending is not None:
+                    # A seek queued while paused does not advance during the
+                    # pause. Rebase its acknowledgement clock without seeking
+                    # again, otherwise a long pause rejects the correct audio
+                    # time and triggers a spurious drift correction.
+                    self._audio_seek_pending = (self._audio_seek_pending[0], self._anchor)
+                self._resume_paused_decoders()
+            self._sync(force=restart)
         elif action == "pause":
             self._position = self._clock()
             self._anchor = time.monotonic()
             self._playing = False
-            self._pause_all()
+            self._pause_all(preserve_prewarm=True)
         elif action == "audition":
             camera = values.get("camera")
             self._audition = None if camera is None else int(camera)
@@ -938,13 +955,81 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
         slot.controller.command(['seek', source_time, 'absolute+exact'])
         slot.last_seek_time = time.monotonic()
         slot.prewarm_target = None
+        slot.prewarm_running = False
+        slot.prewarm_epoch = None
+
+    def _refresh_picture_clock(self, slot, target):
+        """Discard a stale displayed queue once, retaining its loaded decoder."""
+        if not slot.active or slot.controller is None:
+            return
+        self._check_navigation()
+        began = time.monotonic()
+        try:
+            if slot.controller.command(['get_property', 'seeking'], timeout=.2) is True:
+                return
+            actual = slot.controller.command(['get_property', 'time-pos'], timeout=.2)
+            target = max(0., target+(time.monotonic()-began if self._playing else 0.))
+            tolerance = 2./max(1., _number(_get(self._project, 'fps', 30.), 30.))
+            if actual is not None and abs(_number(actual)-target) > tolerance:
+                prepared = (slot.prewarm_target, slot.prewarm_running, slot.prewarm_epoch)
+                self._seek_picture(slot, max(0., target))
+                if prepared[1]:
+                    slot.prewarm_target, slot.prewarm_running, slot.prewarm_epoch = prepared
+        except (OSError, RuntimeError) as error:
+            self._check_navigation()
+            self._error('恢复监看同步失败，保留已加载的画面', error)
+
+    def _refresh_presentation(self):
+        """Catch background-throttled pictures up without restarting transport."""
+        if self._project is None:
+            return
+        now = time.monotonic()
+        if now-getattr(self, '_last_presentation_refresh', float('-inf')) < .25:
+            return
+        self._last_presentation_refresh = now
+        position = self._clock() if self._playing else self._position
+        sampled = time.monotonic()
+        def current_time():
+            return min(self._duration(), position+(time.monotonic()-sampled if self._playing else 0.))
+        if self._playing:
+            if self._gpu_live_enabled:
+                context = self._gpu_context
+                if context is not None:
+                    for name, side in (('a', context['plan'].outgoing), ('b', context['plan'].incoming)):
+                        self._refresh_picture_clock(context[name], side.native_time(current_time()))
+                else:
+                    live = current_time()
+                    spec = self._program_spec(self._camera_at(live), live)
+                    if spec is not None and self._program.key == spec[0]:
+                        self._refresh_picture_clock(self._program, spec[2])
+            elif not self._stack_enabled:
+                live = current_time()
+                spec = self._program_spec(self._camera_at(live), live)
+                if spec is not None and self._program.key == spec[0]:
+                    self._refresh_picture_clock(self._program, spec[2])
+                staging = self._program_standby
+                if staging is not None and staging.prewarm_running and staging.prewarm_epoch is not None:
+                    self._refresh_picture_clock(staging, current_time()-staging.prewarm_epoch)
+            for camera, slot in self._slots.items():
+                spec = self._clip(camera, current_time())
+                if spec is not None and slot.key == spec[0]:
+                    self._refresh_picture_clock(slot, spec[2])
+            if self._comparison_enabled and self._comparison is not None:
+                live = current_time()
+                spec = self._comparison_spec(self._camera_at(live), live)
+                if spec is not None and self._comparison.key == spec[0]:
+                    self._refresh_picture_clock(self._comparison, spec[2])
+        if self._stack_enabled:
+            self._resync_stack_preview(current_time())
+        elif self._gpu_live_enabled:
+            self._gpu_session.wake()
 
     def _seek_audio(self, source_time):
         self._audio.controller.command(['seek', source_time, 'absolute+exact'])
         self._audio_seek_pending = (source_time, time.monotonic())
 
     def _set_picture_speed(self, slot: _Slot, speed: float) -> bool:
-        speed = max(1.0, min(1.15, speed))
+        speed = max(.85, min(1.15, speed))
         if abs(slot.playback_speed-speed) < .001:
             return False
         slot.controller.command(['set_property', 'speed', speed])
@@ -952,15 +1037,16 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
         return True
 
     def _catch_up_picture(self, slot: _Slot, delta: float) -> bool:
-        speed = 1.+min(.15, max(0., delta)*2) if delta > .04 else 1.
+        frame_tolerance = .5/max(1., _number(_get(self._project, 'fps', 30.), 30.))+.002
+        speed = 1.+max(-.15, min(.15, delta*2)) if abs(delta) > frame_tolerance else 1.
         return self._set_picture_speed(slot, speed)
 
     def _correct_picture_drift(self, slot: _Slot, source_time: float, *, thumbnail=False) -> bool:
         """Do not restart a pending GOP seek or repeatedly chase slow decode."""
-        cooldown = self.THUMB_DRIFT_COOLDOWN if thumbnail else self.DRIFT_COOLDOWN
+        cooldown = .2 if thumbnail else self.DRIFT_COOLDOWN
         limit = self.THUMB_DRIFT_LIMIT if thumbnail else self.DRIFT_LIMIT
         now = time.monotonic()
-        catching_up = not thumbnail and slot.playback_speed > 1.
+        catching_up = abs(slot.playback_speed-1.) > .001
         if catching_up and now-slot.last_speed_poll < .1:
             return False
         if not catching_up and now-slot.last_seek_time < cooldown:
@@ -971,15 +1057,16 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
                 if not thumbnail: self._set_picture_speed(slot, 1.)
                 return False
             actual = slot.controller.command(['get_property', 'time-pos'], timeout=timeout)
-            if not thumbnail:
-                slot.last_speed_poll = now
-                # Native video playback catches up without restarting a GOP.
-                # A viewer ahead of sound returns to normal speed and waits.
-                return self._catch_up_picture(slot, source_time-_number(actual)) if actual is not None else False
-            if actual is not None and abs(_number(actual)-source_time) <= limit:
+            slot.last_speed_poll = now
+            if actual is None:
                 return False
-            self._seek_picture(slot, source_time)
-            return True
+            delta = source_time-_number(actual)
+            if thumbnail and abs(delta) > limit and now-slot.last_seek_time >= self.THUMB_DRIFT_COOLDOWN:
+                self._seek_picture(slot, source_time)
+                return True
+            # Both a late programme and an early camera must converge on the
+            # master clock. Keeping early viewers at 1x preserves their offset.
+            return self._catch_up_picture(slot, delta)
         except (OSError, RuntimeError) as error:
             # A busy or failed viewer must not stop the master sound or the
             # other running decoders merely because its status query failed.
@@ -993,7 +1080,16 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
         prepared_position = source_time
         if not force and not newly_loaded:
             actual = slot.controller.command(['get_property', 'time-pos'])
-            tolerance = self.DRIFT_LIMIT if self._playing else .5/max(1., _number(_get(self._project, 'fps', 30.), 30.))
+            fps = max(1., _number(_get(self._project, 'fps', 30.), 30.))
+            try:
+                native_fps = slot.controller.command(['get_property', 'container-fps'], timeout=.2)
+                fps = max(fps, _number(native_fps, fps))
+            except (OSError, RuntimeError):
+                pass
+            # The hidden decoder is paused. A drift-sized tolerance could
+            # reuse a frame 120 ms behind, then wait forever for the native
+            # renderer's half-frame readiness barrier to accept that frame.
+            tolerance = .5/fps+.001
             reuse = actual is not None and abs(_number(actual)-source_time) <= tolerance
             if reuse: prepared_position = _number(actual)
         if not reuse:
@@ -1014,6 +1110,15 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
     def _load_picture(self, controller, path):
         # MPV's decoder wait can also outlive a drag. The optional attribute
         # keeps native GPU controllers and older controller adapters compatible.
+        # loadfile may already replace the file when a newer navigation cancels
+        # its readiness wait. Retaining the previous asset key would then allow
+        # a seek back to that asset to publish frames from the replacement file.
+        for slot in self._all_slots():
+            if slot.controller is controller:
+                slot.key, slot.active, slot.prewarm_target = None, False, None
+                slot.prewarm_running = False
+                slot.subtitle_key = slot.subtitle_id = None
+                break
         controller.operation_cancel_event = self._preview_cancel_event()
         try:
             controller.load(path)
@@ -1098,10 +1203,10 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
                     self._sync_program_subtitles(spec, newly_loaded)
                 correct = freeze or newly_loaded
                 if not correct and self._playing:
-                    if audio and drift:
-                        actual = controller.command(["get_property", "time-pos"])
-                        correct = actual is None or abs(_number(actual) - source_time) > self.DRIFT_LIMIT
-                    elif not audio and (drift or slot.playback_speed > 1.):
+                    # Audio is the master, not another picture to chase this
+                    # tick's older clock sample. Slow IPC must never seek the
+                    # continuously running sound backwards to that sample.
+                    if not audio and (drift or abs(slot.playback_speed-1.) > .001):
                         self._correct_picture_drift(slot, source_time)
                 if correct and not freeze:
                     if audio: self._seek_audio(source_time)
@@ -1250,7 +1355,7 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
                 self._check_navigation()
                 correct = force or newly_loaded or not slot.active or navigation_due
                 check_drift = drift if not large_page else self._thumbnail_drift_remaining > 0 and drift_checked < 4
-                if not correct and check_drift and self._playing:
+                if not correct and (check_drift or abs(slot.playback_speed-1.) > .001) and self._playing:
                     self._correct_picture_drift(slot, source_time, thumbnail=True)
                     if large_page:
                         drift_checked += 1
@@ -1326,6 +1431,17 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
             slot.subtitle_key = slot.subtitle_id = None
         self._awaiting_comparison_swap = None
 
+    def _park_hidden_picture(self, slot):
+        """Stop an old buffer only after Tk has actually raised its successor."""
+        if slot is None or slot.controller is None:
+            return
+        try:
+            self._set_picture_speed(slot, 1.)
+            slot.controller.command(['set_property', 'pause', True])
+            slot.prewarm_running = False
+        except Exception as error:
+            self._error('暂停已隐藏的监看画面失败', error)
+
     def _sync_double_comparison(self, *, force=False, drift=False):
         """Keep the original beside stabilized output without freezing sound."""
         current = self._comparison
@@ -1342,7 +1458,7 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
             if force:
                 self._seek_picture(current, source_time)
                 current.controller.command(['set_property','pause',not self._playing])
-            elif self._playing and (drift or current.playback_speed > 1.):
+            elif self._playing and (drift or abs(current.playback_speed-1.) > .001):
                 self._correct_picture_drift(current, source_time)
             return
         if self._awaiting_comparison_swap is not None: return
@@ -1384,9 +1500,6 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
             self._position,self._anchor=latest_position,time.monotonic()
             self._awaiting_comparison_swap=staging.window
             self._emit('comparison_swap',staging.window)
-            if current is not staging and current.controller is not None:
-                self._set_picture_speed(current, 1.)
-                current.controller.command(['set_property','pause',True])
         except Exception as exc:
             self._check_navigation()
             staging.failed_key=key
@@ -1407,7 +1520,7 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
             if force:
                 self._seek_picture(current, source_time)
                 current.controller.command(["set_property", "pause", not self._playing])
-            elif self._playing and (drift or current.playback_speed > 1.):
+            elif self._playing and (drift or abs(current.playback_speed-1.) > .001):
                 self._correct_picture_drift(current, source_time)
             if not force:
                 self._prewarm_program(position)
@@ -1421,12 +1534,15 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
             return
         try:
             newly_loaded = staging.key != key
+            running_handoff = (not newly_loaded and not force and self._playing
+                               and staging.prewarm_running)
             if staging.controller is None:
                 staging.controller = self._new_program_controller(staging.window)
             controller = staging.controller
             controller.start()
-            self._set_picture_speed(staging, 1.)
-            controller.command(["set_property", "pause", True])
+            if not running_handoff:
+                self._set_picture_speed(staging, 1.)
+                controller.command(["set_property", "pause", True])
             controller.command(["set_property", "mute", True])
             if newly_loaded:
                 self._load_picture(controller, path)
@@ -1446,7 +1562,23 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
                     self._program_grade_chain(self._camera_at(position), position),
                     bypass=self._is_baked_key(key)):
                 self._error("实时调色提示", RuntimeError(notice))
-            ready_position = self._prepare_picture_frame(staging, source_time, force=force, newly_loaded=newly_loaded)
+            if running_handoff:
+                # This decoder has already rendered and is following the
+                # master clock in the background. Pausing/seeking here would
+                # discard that continuity and reintroduce an effect-exit gap.
+                ready_position = _number(controller.command(['get_property', 'time-pos']), source_time)
+            else:
+                frame_target = source_time
+                if (self._playing and not force and not newly_loaded and self._is_baked_key(key)
+                        and staging.prewarm_target and staging.prewarm_target[0] == key):
+                    prepared = staging.prewarm_target[1]
+                    frame_duration = 1./max(1., _number(_get(self._project, 'fps', 30.), 30.))
+                    if 0. <= source_time-prepared <= frame_duration+.001:
+                        # A short cache cannot preroll before its first frame.
+                        # Publish that verified frame within its frame interval
+                        # instead of restarting its GOP a few ms into the cut.
+                        frame_target = prepared
+                ready_position = self._prepare_picture_frame(staging, frame_target, force=force, newly_loaded=newly_loaded)
             latest_position = self._clock() if self._playing and not force else self._position
             latest = self._program_spec(self._camera_at(latest_position), latest_position)
             if latest is None or latest[0] != key:
@@ -1454,19 +1586,20 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
             if self._closing.is_set():
                 return
             staging.active = True
-            staging.last_seek_time = time.monotonic()
+            if not running_handoff:
+                staging.last_seek_time = time.monotonic()
             staging.prewarm_target = None
+            staging.prewarm_running = False
             if self._playing: self._catch_up_picture(staging, latest[2]-ready_position)
-            controller.command(["set_property", "pause", not self._playing])
+            if not running_handoff:
+                controller.command(["set_property", "pause", not self._playing])
             if staging is not current:
                 self._program, self._program_standby = staging, current
             self._position, self._anchor = latest_position, time.monotonic()
             self._awaiting_program_swap = staging.window
             self._emit("program_swap", staging.window)
-            if current is not staging and current.controller is not None:
-                # Keep its last frame intact underneath until the next load.
-                self._set_picture_speed(current, 1.)
-                current.controller.command(["set_property", "pause", True])
+            # Tk may be busy. Keep the old visible buffer moving until its
+            # replacement has been raised and the swap acknowledgement arrives.
         except Exception as exc:
             self._check_navigation()
             staging.failed_key = key
@@ -1500,8 +1633,17 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
                 continue
             key, path, source_time = spec
             target = (key, source_time)
-            if staging.failed_key == key or (staging.key == key and staging.prewarm_target == target):
+            if staging.failed_key == key:
                 return
+            can_preroll = (self._playing and not self._gpu_live_enabled and
+                           not self._is_baked_key(key) and source_time >= edge-position)
+            if staging.key == key and staging.prewarm_target == target:
+                if staging.prewarm_running:
+                    if self._playing:
+                        self._correct_picture_drift(staging, max(0., source_time+position-edge))
+                    return
+                if not can_preroll:
+                    return
             try:
                 if staging.controller is None:
                     staging.controller = self._new_program_controller(staging.window)
@@ -1513,12 +1655,31 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
                 else:
                     controller.command(['set_property', 'pause', True])
                 controller.command(['set_property', 'mute', True])
-                if staging.key != key:
+                newly_loaded = staging.key != key
+                if newly_loaded:
                     self._load_picture(controller, path)
                     staging.key, staging.failed_key = key, None
                     staging.subtitle_key, staging.subtitle_id = None, None
-                self._seek_picture(staging, source_time)
+                if not self._gpu_live_enabled:
+                    # Compile the first colour shader and load subtitle tracks
+                    # while this buffer is hidden, not on the effect boundary.
+                    self._sync_program_subtitles(spec, newly_loaded, staging, edge)
+                    for notice in self._grade_engine.apply(controller,
+                            self._program_grade_chain(self._camera_at(edge), edge),
+                            bypass=self._is_baked_key(key)):
+                        self._error('实时调色提示', RuntimeError(notice))
+                    live_position = self._clock() if can_preroll else edge
+                    ready = self._prepare_picture_frame(staging,
+                        max(0., source_time+live_position-edge), force=True)
+                    if can_preroll:
+                        live_position = self._clock()
+                        self._catch_up_picture(staging, source_time+live_position-edge-ready)
+                        controller.command(['set_property', 'pause', False])
+                        staging.active = staging.prewarm_running = True
+                else:
+                    self._seek_picture(staging, source_time)
                 staging.prewarm_target = target
+                staging.prewarm_epoch = edge-source_time
                 if self._gpu_live_enabled:
                     # It owns a future frame, rather than an active clock.
                     # Handoff verifies this frame without a second GOP seek.
@@ -1628,9 +1789,27 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
                 self._error("清空预览失败", exc)
         slot.key, slot.active = None, False
         slot.prewarm_target = None
+        slot.prewarm_running = False
         slot.subtitle_key, slot.subtitle_id = None, None
 
-    def _pause_all(self, *, thumbnails=True) -> None:
+    def _resume_paused_decoders(self):
+        """Continue decoded frames after a transport pause without a GOP seek."""
+        slots = [self._audio, self._program, *self._slots.values()]
+        if self._comparison_enabled and self._comparison is not None:
+            slots.append(self._comparison)
+        if self._program_standby is not None and (
+                self._program_standby.prewarm_running or self._awaiting_program_swap is not None):
+            slots.append(self._program_standby)
+        if self._comparison_standby is not None and self._awaiting_comparison_swap is not None:
+            slots.append(self._comparison_standby)
+        for slot in slots:
+            if slot.active and slot.controller is not None:
+                if self._gpu_live_enabled and slot in (self._program, self._program_standby):
+                    self._gpu_pause(slot, False, force=True)
+                else:
+                    slot.controller.command(['set_property', 'pause', False])
+
+    def _pause_all(self, *, thumbnails=True, preserve_prewarm=False) -> None:
         for slot in self._all_slots():
             if not thumbnails and (slot in self._slots.values() or slot in getattr(self, '_retired_camera_slots', {}).values()):
                 continue
@@ -1638,6 +1817,8 @@ class MulticamPlayer(VideoStackPlayerMixin, GpuLivePlayerMixin):
                 try:
                     if slot is not self._audio: self._set_picture_speed(slot, 1.)
                     slot.controller.command(["set_property", "pause", True])
+                    if not preserve_prewarm:
+                        slot.prewarm_running = False
                 except Exception as exc:
                     self._error("暂停预览失败", exc)
 

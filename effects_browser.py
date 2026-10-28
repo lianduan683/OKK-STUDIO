@@ -21,6 +21,8 @@ from editor_core import format_time
 from exporter_core import CREATE_NO_WINDOW, find_binary
 from effects_library import (load_overlay_assets, load_transition_masks, asset_path,
                              transition_mask_path, default_app_dir)
+from effects_catalog import (GROUPS, catalog_categories, category_sort_key, overlay_metadata,
+                             mask_metadata, query_words, searchable_text)
 from cache_paths import cache_dir
 
 PANEL, INPUT, INK, MUTED, ACCENT = '#292b2e', '#18191b', '#dedfe3', '#969ba3', '#58a6d6'
@@ -66,7 +68,7 @@ PRESETS = (
     EffectPreset('gyro_stabilize', '陀螺仪防抖', '防抖工具', '为所选片段打开 Gyroflow 设置，检测运动数据与镜头配置。', kind='tool', action='gyro_stabilize', swatch='#8ba6ac'),
 )
 PRESET_BY_KEY = {item.key:item for item in PRESETS}
-CATEGORIES = ('全部', '调色风格', '转场', '字幕工具', '防抖工具')
+CATEGORIES = GROUPS
 
 
 def library_presets():
@@ -76,23 +78,27 @@ def library_presets():
         try: asset_path(asset)
         except ValueError: continue
         composition='透明通道叠加' if asset.kind=='alpha' else '滤色叠加'
-        items.append(EffectPreset('overlay:'+asset.id,asset.name,'叠加 / '+asset.category,
+        name, category = overlay_metadata(asset)
+        items.append(EffectPreset('overlay:'+asset.id,name,category,
             f'{composition} · {asset.width}×{asset.height} · {asset.duration:.1f} 秒。应用到所选节目片段，强度控制不透明度。',
             kind='overlay',swatch='#b08d70',asset=asset))
     for mask in load_transition_masks():
         try: transition_mask_path(mask)
         except ValueError: continue
-        items.append(EffectPreset('mask:'+mask.id,mask.name,'遮罩转场 / '+mask.category,
-            '使用此遮罩在所选片段末尾连接下一片段；导出和效果预览使用同一遮罩。',
+        name, category = mask_metadata(mask)
+        items.append(EffectPreset('mask:'+mask.id,name,category,
+            '使用灰度遮罩在所选片段末尾连接下一片段；可调整过渡时长，导出和效果预览使用同一遮罩。',
             kind='mask',swatch='#819a9a',asset=mask))
-    return tuple(items)
+    # Keep built-in preset order and stable IDs. Sort asset families together.
+    return tuple(items[:len(PRESETS)] + sorted(items[len(PRESETS):],
+        key=lambda item: (category_sort_key(item.category), item.key)))
 
 
 def filtered_presets(category='全部', query='', presets=PRESETS):
-    words = str(query).casefold().split()
+    words = query_words(query)
     return tuple(item for item in presets
                  if (category in ('全部',item.category) or item.category.startswith(category+' / ')) and all(word in
-                    f'{item.name} {item.category} {item.description} {item.key}'.casefold() for word in words))
+                    searchable_text(item) for word in words))
 
 
 def preset_grade(preset: EffectPreset, original: ColorGrade, strength: float = 1.) -> ColorGrade:
@@ -164,11 +170,13 @@ class EffectsBrowser(tk.Frame):
         self.ws = workspace
         self.query = tk.StringVar(self)
         self.category = tk.StringVar(self,value='全部')
+        self.subcategory = tk.StringVar(self,value='全部类型')
         self.strength = tk.DoubleVar(self,value=100.)
         self.strength_text = tk.StringVar(self,value='100%')
         self.duration = tk.StringVar(self,value='0.5')
         self.target_text = tk.StringVar(self)
         self.detail_text = tk.StringVar(self)
+        self.category_text = tk.StringVar(self)
         self.feedback = tk.StringVar(self,value='先选择节目片段，再选择效果并应用。')
         self._previewing = False
         self._preview_selection = None
@@ -182,6 +190,11 @@ class EffectsBrowser(tk.Frame):
         self._thumb_worker = None
         self._thumb_serial = 0
         self._thumb_photo = None
+        self._thumb_original = None
+        self._thumb_message = ''
+        self._selected_detail_key = None
+        self._responsive_key = None
+        self._filtering = False
         px = workspace._px
         self.columnconfigure(0,weight=1)
         self.rowconfigure(3,weight=2,minsize=px(128))
@@ -198,8 +211,16 @@ class EffectsBrowser(tk.Frame):
         self.search_entry=tk.Entry(filters,textvariable=self.query,bg=INPUT,fg=INK,insertbackground=INK,
                                   relief='flat',font=FONT)
         self.search_entry.pack(side='left',fill='x',expand=True,ipady=px(4))
-        self.categories=ttk.Combobox(self,textvariable=self.category,values=self._categories(),state='readonly')
-        self.categories.grid(row=2,column=0,sticky='ew',padx=px(10),pady=(0,px(7)))
+        self.category_filters=tk.Frame(self,bg=PANEL)
+        self.category_filters.grid(row=2,column=0,sticky='ew',padx=px(10),pady=(0,px(7)))
+        self.category_filters.columnconfigure(0,weight=1,uniform='effect-filter')
+        self.category_filters.columnconfigure(1,weight=1,uniform='effect-filter')
+        self.categories=ttk.Combobox(self.category_filters,textvariable=self.category,
+            values=self._categories(),state='readonly',width=8)
+        self.categories.grid(row=0,column=0,sticky='ew',padx=(0,px(4)))
+        self.subcategories=ttk.Combobox(self.category_filters,textvariable=self.subcategory,
+            values=('全部类型',),state='readonly',width=10)
+        self.subcategories.grid(row=0,column=1,sticky='ew')
         results=tk.Frame(self,bg=INPUT)
         results.grid(row=3,column=0,sticky='nsew',padx=px(10))
         self.list = ttk.Treeview(results,columns=('category',),show='tree headings',selectmode='browse',
@@ -227,6 +248,8 @@ class EffectsBrowser(tk.Frame):
         details.grid(row=0,column=0,sticky='ew')
         self.swatch=tk.Frame(details,bg=ACCENT,height=px(4));self.swatch.pack(fill='x',pady=(0,px(6)))
         self.thumbnail=tk.Canvas(details,bg=INPUT,height=px(80),highlightthickness=0)
+        self.thumbnail.bind('<Configure>',lambda event:self._draw_thumbnail())
+        self._wrapped(details,self.category_text,ACCENT).pack(fill='x',pady=(0,px(4)))
         self._wrapped(details,self.detail_text,INK).pack(fill='x')
         self._wrapped(details,self.target_text,MUTED).pack(fill='x',pady=(px(6),0))
         self.strength_row=tk.Frame(self.detail_body,bg=PANEL)
@@ -239,23 +262,31 @@ class EffectsBrowser(tk.Frame):
         self.duration_row=tk.Frame(self.detail_body,bg=PANEL)
         tk.Label(self.duration_row,text='遮罩转场时长（秒）',bg=PANEL,fg=MUTED,font=FONT).pack(side='left')
         tk.Entry(self.duration_row,textvariable=self.duration,width=7,bg=INPUT,fg=INK,insertbackground=INK,relief='flat').pack(side='right')
-        actions=tk.Frame(self,bg=PANEL);actions.grid(row=5,column=0,sticky='ew',padx=px(8),pady=(px(4),px(5)))
-        self.preview_button=ttk.Button(actions,text='试看颜色',command=self.preview,style='Compact.TButton')
-        self.preview_button.pack(side='left',fill='x',expand=True,padx=px(2))
-        self.apply_button=ttk.Button(actions,text='应用到所选片段',command=self.apply,style='Compact.TButton')
-        self.apply_button.pack(side='left',fill='x',expand=True,padx=px(2))
-        secondary=tk.Frame(self.detail_body,bg=PANEL);secondary.grid(row=2,column=0,sticky='ew',pady=px(3))
-        self.secondary_button=ttk.Button(secondary,text='停止试看',command=self.stop_preview,style='Compact.TButton')
-        self.secondary_button.pack(side='left',fill='x',expand=True,padx=px(2))
-        ttk.Button(secondary,text='预览已应用效果',command=self.preview_applied,style='Compact.TButton').pack(side='left',fill='x',expand=True,padx=px(2))
+        self.actions=tk.Frame(self,bg=PANEL);self.actions.grid(row=5,column=0,sticky='ew',padx=px(8),pady=(px(4),px(5)))
+        self.actions.columnconfigure(0,weight=1)
+        self.actions.columnconfigure(1,weight=1)
+        self.preview_button=ttk.Button(self.actions,text='试看颜色',command=self.preview,style='Compact.TButton')
+        self.preview_button.grid(row=0,column=0,sticky='ew',padx=px(2))
+        self.apply_button=ttk.Button(self.actions,text='应用到所选片段',command=self.apply,style='Compact.TButton')
+        self.apply_button.grid(row=0,column=1,sticky='ew',padx=px(2))
+        self.secondary_actions=tk.Frame(self.detail_body,bg=PANEL)
+        self.secondary_actions.grid(row=2,column=0,sticky='ew',pady=px(3))
+        self.secondary_actions.columnconfigure(0,weight=1)
+        self.secondary_actions.columnconfigure(1,weight=1)
+        self.secondary_button=ttk.Button(self.secondary_actions,text='停止试看',command=self.stop_preview,style='Compact.TButton')
+        self.secondary_button.grid(row=0,column=0,sticky='ew',padx=px(2))
+        self.applied_preview_button=ttk.Button(self.secondary_actions,text='预览已应用效果',command=self.preview_applied,style='Compact.TButton')
+        self.applied_preview_button.grid(row=0,column=1,sticky='ew',padx=px(2))
         self._wrapped(self.detail_body,self.feedback,MUTED).grid(row=3,column=0,sticky='ew',pady=(px(4),px(8)))
         self._bind_detail_wheel(self.detail_body)
         self.detail_canvas.bind('<MouseWheel>',self._detail_wheel)
         self.query.trace_add('write',self._filter)
-        self.category.trace_add('write',self._filter)
+        self.category.trace_add('write',self._category_changed)
+        self.subcategory.trace_add('write',self._filter)
+        self.bind('<Configure>',self._responsive_layout,add='+')
         self.bind('<Unmap>',self._unmap,add='+')
         self.bind('<Map>',lambda event:self.refresh(),add='+')
-        self._filter();self._poll_selection()
+        self._category_changed();self._poll_selection()
 
     def _wrapped(self,parent,variable,color):
         label=tk.Label(parent,textvariable=variable,bg=PANEL,fg=color,font=FONT,anchor='w',justify='left',wraplength=self.ws._px(260))
@@ -275,28 +306,70 @@ class EffectsBrowser(tk.Frame):
         return self._catalog_by_key.get(selection[0]) if selection else None
 
     def _categories(self):
-        return CATEGORIES+('叠加','遮罩转场')+tuple(sorted({item.category for item in self._catalog if item.kind in ('overlay','mask')}))
+        present={item.category.split(' / ',1)[0] for item in self._catalog}
+        return tuple(group for group in CATEGORIES if group=='全部' or group in present)
+
+    def _category_changed(self,*_):
+        categories=catalog_categories(self._catalog,self.category.get())
+        # A short leaf label fits alongside the main group in narrow inspectors.
+        self._subcategory_values={'全部类型': self.category.get()}
+        for category in categories:
+            label=category if self.category.get()=='全部' else category.split(' / ',1)[1]
+            self._subcategory_values[label]=category
+        self.subcategories.configure(values=tuple(self._subcategory_values),
+            state='readonly' if categories else 'disabled')
+        if self.subcategory.get() not in self._subcategory_values:
+            self.subcategory.set('全部类型')
+        self._filter()
+
+    def _responsive_layout(self,event):
+        if event.widget is not self:return
+        px=self.ws._px
+        compact=event.width<px(430)
+        stacked=event.width<px(295)
+        key=compact,stacked
+        if key==self._responsive_key:return
+        self._responsive_key=key
+        self.list.configure(displaycolumns=() if compact else ('category',))
+        self.list.column('category',width=px(125),stretch=False)
+        for first,second in ((self.preview_button,self.apply_button),
+                             (self.secondary_button,self.applied_preview_button)):
+            first.grid_configure(row=0,column=0,columnspan=2 if stacked else 1)
+            second.grid_configure(row=1 if stacked else 0,column=0 if stacked else 1,
+                columnspan=2 if stacked else 1,pady=(px(3),0) if stacked else 0)
 
     def reload_library(self):
         self._catalog=library_presets()
         self._catalog_by_key={item.key:item for item in self._catalog}
         self.categories.configure(values=self._categories())
-        self._filter()
+        self._selected_detail_key=None
+        if self.category.get() not in self._categories():self.category.set('全部')
+        self._category_changed()
 
     def _filter(self,*_):
+        if self._filtering:return
+        self._filtering=True
         selected=self.list.selection()
-        self._items=filtered_presets(self.category.get(),self.query.get(),self._catalog)
+        category=getattr(self,'_subcategory_values',{}).get(self.subcategory.get(),self.category.get())
+        self._items=filtered_presets(category,self.query.get(),self._catalog)
         self.list.delete(*self.list.get_children())
-        for item in self._items:self.list.insert('','end',iid=item.key,text=item.name,values=(item.category,))
-        self.count_label.configure(text=f'{len(self._items)} 个效果')
+        for item in self._items:self.list.insert('','end',iid=item.key,text=item.name,values=(item.category.split(' / ',1)[-1],))
+        self.count_label.configure(text=f'{len(self._items)}/{len(self._catalog)} 项')
         if self._items:
             key=selected[0] if selected and any(item.key==selected[0] for item in self._items) else self._items[0].key
             self.list.selection_set(key)
+            self.list.see(key)
+        self._filtering=False
         self._selection_changed()
 
     def _selection_changed(self,event=None):
-        self.stop_preview(quiet=True)
         item=self.selected_preset()
+        key=item.key if item else ''
+        if key==self._selected_detail_key:
+            self.refresh();return
+        self._selected_detail_key=key
+        self.stop_preview(quiet=True)
+        self.category_text.set(f'{item.category}\n{item.name}' if item else '')
         self.detail_text.set(item.description if item else '没有匹配的效果，请更换搜索词或分类。')
         self.swatch.configure(bg=item.swatch if item else PANEL)
         self.preview_button.configure(state='normal' if item and item.kind=='grade' else 'disabled')
@@ -333,11 +406,12 @@ class EffectsBrowser(tk.Frame):
 
     def _request_thumbnail(self,item):
         self._thumb_serial+=1
-        self.thumbnail.delete('all');self._thumb_photo=None
+        self.thumbnail.delete('all');self._thumb_photo=None;self._thumb_original=None
+        self._thumb_message=''
         if item is None or item.kind not in ('overlay','mask'):
             self.thumbnail.pack_forget();return
         self.thumbnail.pack(fill='x',before=self.swatch,pady=(0,self.ws._px(6)))
-        self.thumbnail.create_text(self.ws._px(128),self.ws._px(40),text='读取缩略图…',fill=MUTED,font=FONT)
+        self._thumb_message='读取缩略图…';self._draw_thumbnail()
         while True:
             try:self._thumb_requests.get_nowait()
             except queue.Empty:break
@@ -390,18 +464,26 @@ class EffectsBrowser(tk.Frame):
             try:serial,path,error=self._thumb_results.get_nowait()
             except queue.Empty:return
             if serial!=self._thumb_serial:continue
-            self.thumbnail.delete('all')
             try:
                 if error:raise ValueError(error)
-                picture=tk.PhotoImage(master=self,file=path)
-                max_width=max(self.ws._px(100),self.thumbnail.winfo_width())
-                max_height=self.ws._px(80)
-                shrink=max(1,math.ceil(picture.width()/max_width),math.ceil(picture.height()/max_height))
-                if shrink>1:picture=picture.subsample(shrink,shrink)
-                self._thumb_photo=picture
-                self.thumbnail.create_image(max_width/2,max_height/2,image=picture)
+                self._thumb_original=tk.PhotoImage(master=self,file=path)
+                self._thumb_message=''
             except (ValueError,tk.TclError):
-                self.thumbnail.create_text(self.ws._px(128),self.ws._px(40),text='缩略图暂不可用',fill=MUTED,font=FONT)
+                self._thumb_original=None;self._thumb_message='缩略图暂不可用'
+            self._draw_thumbnail()
+
+    def _draw_thumbnail(self):
+        self.thumbnail.delete('all')
+        width=max(1,self.thumbnail.winfo_width())
+        height=max(1,self.ws._px(80))
+        picture=self._thumb_original
+        if picture is not None:
+            shrink=max(1,math.ceil(picture.width()/width),math.ceil(picture.height()/height))
+            self._thumb_photo=picture.subsample(shrink,shrink) if shrink>1 else picture
+            self.thumbnail.create_image(width/2,height/2,image=self._thumb_photo)
+        elif self._thumb_message:
+            self.thumbnail.create_text(width/2,height/2,text=self._thumb_message,fill=MUTED,font=FONT,
+                width=max(1,width-self.ws._px(10)))
 
     def _strength_changed(self,value):
         self.strength_text.set(f'{float(value):.0f}%')

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import json
+from bisect import bisect_left
 import subprocess
 import threading
 import uuid
@@ -54,6 +55,12 @@ class TimelineInteractionMixin:
         self.timeline.bind('<ButtonPress-2>', self._timeline_pan_press)
         self.timeline.bind('<B2-Motion>', self._timeline_pan_motion)
         self.timeline.bind('<MouseWheel>', self._timeline_vertical_wheel)
+        # Replace the original widget binding: Ctrl+wheel must not also scroll
+        # vertically, and its zoom anchor follows the pointer.
+        self.timeline.bind('<Control-MouseWheel>', self._timeline_zoom_wheel)
+        self.timeline_vscroll.configure(command=self._timeline_vertical_scroll)
+        self.timeline.configure(xscrollcommand=self._timeline_xview_changed,
+                                yscrollcommand=self._timeline_yview_changed)
         self.timeline.bind('<Motion>', self._timeline_hover)
         self.timeline.bind('<Leave>', lambda _event: self.timeline.configure(cursor='')
                            if self._program_boundary_drag is None else None)
@@ -68,19 +75,54 @@ class TimelineInteractionMixin:
         return 'break'
 
     def _timeline_vertical_wheel(self, event):
+        if not event.delta:
+            return 'break'
         self.timeline.yview_scroll(-3 if event.delta > 0 else 3, 'units')
         self.draw_playhead()
+        self._queue_timeline_redraw()
+        return 'break'
+
+    def _timeline_vertical_scroll(self, *args):
+        self.timeline.yview(*args)
+        self.draw_playhead()
+        self._queue_timeline_redraw()
+
+    def _timeline_xview_changed(self, first, last):
+        self.scroll.set(first, last)
+        self._pin_timeline_headers()
+        view = (float(first), float(last))
+        if vars(self).get('_timeline_last_xview') != view:
+            self._timeline_last_xview = view
+            self._queue_timeline_redraw()
+
+    def _timeline_yview_changed(self, first, last):
+        self.timeline_vscroll.set(first, last)
+        view = (float(first), float(last))
+        if vars(self).get('_timeline_last_yview') != view:
+            self._timeline_last_yview = view
+            self._queue_timeline_redraw()
+
+    def _timeline_zoom_wheel(self, event):
+        if event.delta:
+            self.change_zoom(2 if event.delta > 0 else .5, anchor_x=event.x)
         return 'break'
 
     def _timeline_boundary_at(self, event):
         x, y = self.timeline.canvasx(event.x), self.timeline.canvasy(event.y)
         if not self._timeline_program_bounds[0] <= y <= self._timeline_program_bounds[1]:
             return None
-        candidates = [(abs(self._timeline_x(value)-x), value) for value in self._timeline_boundary_times]
+        scale, origin = self._timeline_scale(), self._timeline_origin()
+        position = origin + (x-self._timeline_left)/scale
+        times = self._timeline_boundary_times
+        index = bisect_left(times, position)
+        # Sorted programme edges make hover independent of project length.
+        candidates = [(abs(self._timeline_left+(value-origin)*scale-x), value)
+                      for value in times[max(0, index-1):index+1]]
         distance, position = min(candidates, default=(float('inf'), None))
         return position if distance <= self._px(6) else None
 
     def _timeline_hover(self, event):
+        if getattr(self, '_selection_gesture', None): return
         if self._video_stack_hover(event): return
         if self._program_boundary_drag is not None:
             return
@@ -156,6 +198,7 @@ class TimelineInteractionMixin:
             self.project_label.configure(text=(Path(self.project_path).name if self.project_path else '未保存工程')
                                          + (' *' if self.dirty else ''))
             self.selected_program_range = drag['selection']
+        self._rekey_timeline_boundary(drag, reverted)
         self._refresh(reconfigure=drag['changed'])
         self.seek(drag['original'] if reverted else drag['current'])
         if drag['changed']:
@@ -235,7 +278,7 @@ class TimelineInteractionMixin:
         self.import_timeline_paths(paths, start=start, camera=camera, master_audio=master_audio)
         return True
 
-    def import_timeline_paths(self, paths, *, start=None, camera=None, master_audio=None):
+    def import_timeline_paths(self, paths, *, start=None, camera=None, master_audio=None, layer_placement=None):
         """Probe a batch atomically, then place it in the current programme."""
         if not self._available():
             return False
@@ -263,7 +306,7 @@ class TimelineInteractionMixin:
             try:
                 assignments = batch_import(ffprobe, paths, (), cancel_event=cancel)
                 master = probe_timeline_master(ffprobe, str(master_audio)) if master_audio else None
-                self.jobs.put(('timeline_import_ready', (project, start, camera, [info for _, info in assignments], master)))
+                self.jobs.put(('timeline_import_ready', (project, start, camera, [info for _, info in assignments], master, layer_placement)))
             except Exception as error:
                 self.jobs.put(('timeline_import_error', (str(error), cancel.is_set())))
 
@@ -275,6 +318,7 @@ class TimelineInteractionMixin:
         self.app._set_working(False)
         project, start, camera, infos, *master_values = payload
         master = master_values[0] if master_values else None
+        layer_placement = master_values[1] if len(master_values) > 1 else None
         if project is not self.project or self.app.cancel_event.is_set():
             self.status.set('已取消拖入，保留原时间线。')
             return
@@ -282,7 +326,7 @@ class TimelineInteractionMixin:
             return
         alpha = any(bool(getattr(info, 'has_alpha', False)) for info in infos)
         if alpha and camera in project.cameras:
-            camera = max(project.cameras, default=0)+1
+            camera = max(project.timeline_cameras, default=0)+1
         stop = start + sum(info.duration for info in infos)
         if camera is not None and any(item.camera == camera and start < item.end-1e-8
             and stop > item.start+1e-8 for item in getattr(project, 'library_overlays', ())):
@@ -305,8 +349,8 @@ class TimelineInteractionMixin:
         # Alpha dropped over an existing camera needs its own layer so it
         # cannot replace the background source on that same camera track.
         if alpha and camera in project.cameras:
-            camera = max(project.cameras, default=0)+1
-        camera = camera if camera is not None else max(project.cameras, default=0)+1
+            camera = max(project.timeline_cameras, default=0)+1
+        camera = camera if camera is not None else max(project.timeline_cameras, default=0)+1
         clips = []
         position = start
         for info in infos:
@@ -318,7 +362,11 @@ class TimelineInteractionMixin:
         # Ordinary multicam drops become programme edits. Layered drops keep
         # that edit intact and make the new source visible via composition.
         stop = math.floor(position*project.fps+.5)/project.fps
-        if alpha: self._activate_alpha_layers([camera])
+        if layer_placement is not None:
+            self._place_inserted_video_layer(camera, layer_placement)
+        elif alpha: self._activate_alpha_layers([camera])
+        elif camera in project.timeline_empty_tracks:
+            project.video_stack_enabled = True
         if not project.cuts: project.set_cut(0, min(project.cameras))
         if stop > start and not project.video_stack_enabled:
             set_camera_on_range(project, start, stop, camera)

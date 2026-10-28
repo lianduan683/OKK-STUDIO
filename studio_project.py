@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from project_file import (AUTOSAVE_INTERVAL_MS, PROJECT_SUFFIX, ProjectFileError, apply_state, autosave_path, build_project_payload, collect_state, load_recent_projects, projects_dir, read_project_file, record_recent_project, state_digest, write_project_file)
 APP_NAME = 'OKK STUDIO'
-APP_VERSION = '5.12.1'
+APP_VERSION = '5.12.4'
 def app_directory():
     import sys
     return Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent

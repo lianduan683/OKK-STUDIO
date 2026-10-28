@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
+import math
 import shutil
 import threading
 import tkinter as tk
 from dataclasses import dataclass, field
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, font as tkfont
 from typing import Callable, Iterable, Sequence
 
 import lossless_detect as detect
@@ -125,6 +126,13 @@ class LosslessWorkspace:
         self.playback_index = -1
         self.playback_loop = False
         self._redraw_after: str | None = None
+        self._timeline_draw_after: str | None = None
+        self._timeline_zoom = 1.0
+        self._timeline_selection: set[str] = set()
+        self._timeline_gesture = None
+        self._timeline_preview = None
+        self._timeline_items: dict[int, str] = {}
+        self._timeline_syncing_selection = False
         self._track_vars: dict[int, tk.BooleanVar] = {}
         self._job_counter = 0
         self._active_job = 0
@@ -210,6 +218,8 @@ class LosslessWorkspace:
             self.app.lossless_subtab = self.notebook.index(self.notebook.select())
 
     def unmount(self) -> None:
+        self._timeline_cancel()
+        self._cancel_timeline_draw()
         self.stop_playback(pause=True)
         if self._redraw_after:
             try:
@@ -226,6 +236,9 @@ class LosslessWorkspace:
 
     def reset_session(self) -> None:
         """Drop every trace of the previous media/project before a new one."""
+        self._timeline_cancel()
+        self._timeline_selection.clear()
+        self._timeline_zoom = 1.0
         self.stop_playback(pause=True)
         state = self.state
         state.generation += 1
@@ -320,6 +333,7 @@ class LosslessWorkspace:
     def open_media(self, path: str, *, probe_keyframes: bool = True, preserve: bool = False) -> None:
         if not path or not Path(path).is_file():
             return
+        self._timeline_cancel()
         self.stop_playback(pause=True)
         state = self.state
         state.generation += 1
@@ -329,6 +343,8 @@ class LosslessWorkspace:
         state.probe = None
         state.keyframes = None
         if not preserve:
+            self._timeline_selection.clear()
+            self._timeline_zoom = 1.0
             state.current_time = 0.0
             state.active_id = None
             state.llc_save_error = ""
@@ -520,7 +536,13 @@ class LosslessWorkspace:
         if not hasattr(self, "segment_tree"):
             return
         tree = self.segment_tree
-        selected_ids = set(tree.selection())
+        existing = {item.id for item in self.state.model.segments}
+        selected_ids = self._timeline_selection & existing
+        if self.state.active_id not in existing:
+            self.state.active_id = None
+        if not selected_ids and self.state.active_id:
+            selected_ids = {self.state.active_id}
+        self._timeline_selection = selected_ids
         tree.delete(*tree.get_children())
         for index, segment in enumerate(self.state.model.segments, 1):
             marker = "标记" if segment.is_marker else _time(segment.duration)
@@ -529,14 +551,12 @@ class LosslessWorkspace:
                 _time(segment.start), "" if segment.end is None else _time(segment.end), marker,
                 _tags_text(segment.tags),
             ))
+        selected_ids = [item for item in tree.get_children() if item in selected_ids]
+        if selected_ids:
+            tree.selection_set(*selected_ids)
         if self.state.active_id and tree.exists(self.state.active_id):
-            tree.selection_set(self.state.active_id)
             tree.focus(self.state.active_id)
             tree.see(self.state.active_id)
-        elif selected_ids:
-            for item in selected_ids:
-                if tree.exists(item):
-                    tree.selection_add(item)
 
     def _refresh_active_fields(self) -> None:
         try:
@@ -593,11 +613,26 @@ class LosslessWorkspace:
                        activebackground=PANEL_ALT, activeforeground=TEXT).pack(side="right")
         tk.Label(page, textvariable=self.summary_var, bg=PANEL_ALT, fg=GREEN,
                  font=(UI_FONT, 9), anchor="w").grid(row=1, column=0, sticky="ew", padx=8)
-        canvas = tk.Canvas(page, height=108, bg="#12101c", highlightthickness=1,
+        timeline_holder = tk.Frame(page, bg=PANEL_ALT)
+        timeline_holder.grid(row=2, column=0, sticky="ew", padx=8, pady=5)
+        canvas = tk.Canvas(timeline_holder, height=108, bg="#12101c", highlightthickness=1,
                            highlightbackground=BORDER, cursor="hand2")
-        canvas.grid(row=2, column=0, sticky="ew", padx=8, pady=5)
-        canvas.bind("<Configure>", lambda _event: self._draw_timeline())
-        canvas.bind("<Button-1>", self._timeline_click)
+        canvas.pack(fill="x", expand=True)
+        scroll = ttk.Scrollbar(timeline_holder, orient="horizontal", command=self._timeline_scroll)
+        scroll.pack(fill="x")
+        canvas.configure(xscrollcommand=scroll.set)
+        canvas.bind("<Configure>", lambda _event: self._queue_timeline_draw())
+        canvas.bind("<ButtonPress-1>", self._timeline_click)
+        canvas.bind("<B1-Motion>", self._timeline_motion)
+        canvas.bind("<ButtonRelease-1>", self._timeline_release)
+        canvas.bind("<Button-3>", self._timeline_context)
+        canvas.bind("<Control-MouseWheel>", self._timeline_zoom_wheel)
+        canvas.bind("<MouseWheel>", self._timeline_wheel)
+        canvas.bind("<Shift-MouseWheel>", self._timeline_wheel)
+        canvas.bind("<ButtonPress-2>", self._timeline_pan_press)
+        canvas.bind("<B2-Motion>", self._timeline_pan_motion)
+        for sequence in ('<Delete>', '<BackSpace>', '<Escape>', '<Control-a>', '<Control-z>', '<Control-y>'):
+            canvas.bind(sequence, self._timeline_key)
         self.timeline = canvas
         body = ttk.Panedwindow(page, orient="horizontal")
         body.grid(row=3, column=0, sticky="nsew", padx=8, pady=4)
@@ -620,6 +655,8 @@ class LosslessWorkspace:
         scroll.grid(row=0, column=1, sticky="ns")
         tree.bind("<<TreeviewSelect>>", self._list_selected)
         tree.bind("<Double-Button-1>", lambda _event: self.play_current_loop())
+        for sequence in ('<Delete>', '<BackSpace>', '<Escape>', '<Control-a>', '<Control-z>', '<Control-y>'):
+            tree.bind(sequence, self._timeline_key)
         self.segment_tree = tree
         self._build_editor_controls(right)
         transport = tk.Frame(page, bg=PANEL_ALT)
@@ -675,56 +712,326 @@ class LosslessWorkspace:
         ttk.Button(panel, text="清空全部片段", command=self.clear_segments).pack(fill="x", pady=4)
 
     def _list_selected(self, _event=None) -> None:
+        if self._timeline_syncing_selection:
+            return
         selection = self.segment_tree.selection()
+        self._timeline_selection = set(selection)
         if selection:
-            self.state.active_id = selection[0]
+            focused = self.segment_tree.focus()
+            self.state.active_id = focused if focused in selection else selection[0]
             self._refresh_active_fields()
-            self._draw_timeline()
+        else:
+            self.state.active_id = None
+        self._queue_timeline_draw()
+
+    def _timeline_select(self, identifiers, *, active=None) -> None:
+        existing = {segment.id for segment in self.state.model.segments}
+        self._timeline_selection = set(identifiers) & existing
+        if active not in self._timeline_selection:
+            active = next((item.id for item in self.state.model.segments
+                           if item.id in self._timeline_selection), None)
+        self.state.active_id = active
+        tree = getattr(self, 'segment_tree', None)
+        if tree is not None and self._alive_view(tree):
+            self._timeline_syncing_selection = True
+            try:
+                tree.selection_set(*[item for item in tree.get_children() if item in self._timeline_selection])
+                if active:
+                    tree.focus(active)
+            finally:
+                self._timeline_syncing_selection = False
+        self._refresh_active_fields()
+        self._queue_timeline_draw()
+
+    def _timeline_pps(self) -> float:
+        return max(1., self.timeline.winfo_width()-20.) / max(.001, self.state.duration) * self._timeline_zoom
+
+    def _timeline_time(self, x) -> float:
+        return max(0., min(self.state.duration, (self.timeline.canvasx(x)-10.) / self._timeline_pps()))
+
+    def _timeline_hit(self, x, y):
+        x, y = self.timeline.canvasx(x), self.timeline.canvasy(y)
+        return next((self._timeline_items[item] for item in reversed(
+            self.timeline.find_overlapping(x-2., y-2., x+2., y+2.)) if item in self._timeline_items), None)
+
+    def _queue_timeline_draw(self) -> None:
+        if self._timeline_draw_after is None and self._alive_view(getattr(self, 'timeline', None)):
+            self._timeline_draw_after = self.app.after(16, self._flush_timeline_draw)
+
+    def _flush_timeline_draw(self) -> None:
+        self._timeline_draw_after = None
+        self._draw_timeline()
+
+    def _cancel_timeline_draw(self) -> None:
+        if self._timeline_draw_after is not None:
+            try:
+                self.app.after_cancel(self._timeline_draw_after)
+            except tk.TclError:
+                pass
+            self._timeline_draw_after = None
+
+    def _timeline_scroll(self, *args) -> None:
+        self.timeline.xview(*args)
+        self._queue_timeline_draw()
+
+    def _timeline_wheel(self, event):
+        self.timeline.xview_scroll(-3 if event.delta > 0 else 3, 'units')
+        self._queue_timeline_draw()
+        return 'break'
+
+    def _timeline_pan_press(self, event):
+        self.timeline.scan_mark(event.x, event.y)
+        return 'break'
+
+    def _timeline_pan_motion(self, event):
+        self.timeline.scan_dragto(event.x, event.y, gain=1)
+        self._queue_timeline_draw()
+        return 'break'
+
+    def _timeline_zoom_wheel(self, event):
+        if self._timeline_gesture is not None or self.state.duration <= 0:
+            return 'break'
+        anchor = self._timeline_time(event.x)
+        self._timeline_zoom = max(1., min(4096., self._timeline_zoom * (2. if event.delta > 0 else .5)))
+        width = max(float(self.timeline.winfo_width()), 20.+self.state.duration*self._timeline_pps())
+        self.timeline.configure(scrollregion=(0, 0, width, max(80, self.timeline.winfo_height())))
+        self.timeline.xview_moveto(max(0., (10.+anchor*self._timeline_pps()-event.x)/width))
+        self._queue_timeline_draw()
+        return 'break'
 
     def _timeline_click(self, event) -> None:
-        if self.state.duration <= 0:
+        if self.state.duration <= 0 or getattr(self.app, 'working', False):
             return
-        width = max(1, self.timeline.winfo_width() - 20)
-        current = min(self.state.duration, max(0.0, (event.x - 10) / width * self.state.duration))
-        self.seek(current)
-        for segment in self.state.model.segments:
-            end = segment.start if segment.end is None else segment.end
-            if segment.start - 1e-6 <= current <= end + 1e-6:
-                self.state.active_id = segment.id
-                break
-        self.refresh()
+        self._timeline_cancel()
+        self.timeline.focus_set()
+        self.stop_playback(pause=True)
+        snapshot = self.state.model.segments
+        previous = set(self._timeline_selection)
+        before_active = self.state.active_id
+        x, y = self.timeline.canvasx(event.x), self.timeline.canvasy(event.y)
+        hit = self._timeline_hit(event.x, event.y)
+        additive = bool(getattr(event, 'state', 0) & (0x4 | 0x1))
+        kind = 'scrub' if y < 26 else 'move' if hit else 'marquee'
+        if kind == 'move':
+            selected = previous | {hit} if additive else previous if hit in previous else {hit}
+            if additive and hit in previous:
+                selected.remove(hit)
+            self._timeline_select(selected, active=hit)
+        elif kind == 'marquee' and not additive:
+            self._timeline_select(())
+        self._timeline_gesture = dict(kind=kind, x=x, y=y, end=(x, y),
+            model=self.state.model, generation=self.state.generation, edit_generation=self.state.edit_generation,
+            snapshot=snapshot, before=previous, before_active=before_active,
+            selected=set(self._timeline_selection), additive=additive, scale=self._timeline_pps(),
+            delta=0., moved=False)
+        self.seek(self._timeline_time(event.x))
+
+    def _timeline_gesture_valid(self, gesture) -> bool:
+        return (gesture['model'] is self.state.model and gesture['generation'] == self.state.generation
+                and gesture['edit_generation'] == self.state.edit_generation
+                and not getattr(self.app, 'working', False))
+
+    def _timeline_motion(self, event, *, autoscroll=True):
+        gesture = self._timeline_gesture
+        if gesture is None:
+            return
+        if not self._timeline_gesture_valid(gesture):
+            self._timeline_cancel()
+            return 'break'
+        if gesture['kind'] == 'scrub':
+            gesture['seek'] = self._timeline_time(event.x)
+            self._queue_timeline_draw()
+            return 'break'
+        if autoscroll and self._timeline_zoom > 1 and (event.x < 12 or event.x > self.timeline.winfo_width()-12):
+            self.timeline.xview_scroll(-1 if event.x < 12 else 1, 'units')
+        x, y = self.timeline.canvasx(event.x), self.timeline.canvasy(event.y)
+        gesture['end'] = (x, y)
+        if not gesture['moved'] and max(abs(x-gesture['x']), abs(y-gesture['y'])) < 4:
+            return 'break'
+        gesture['moved'] = True
+        if gesture['kind'] == 'marquee':
+            left, right = sorted((gesture['x'], x))
+            top, bottom = sorted((gesture['y'], y))
+            hit = set()
+            track_bottom = max(80, self.timeline.winfo_height())-24
+            if bottom >= 26 and top <= track_bottom:
+                for segment in gesture['snapshot']:
+                    first = 10.+segment.start*gesture['scale']
+                    last = 10.+(segment.end if segment.end is not None else segment.start)*gesture['scale']
+                    if last+2 >= left and first-2 <= right:
+                        hit.add(segment.id)
+            self._timeline_select(hit | gesture['before'] if gesture['additive'] else hit)
+        else:
+            selected = [item for item in gesture['snapshot'] if item.id in gesture['selected']]
+            if not selected:
+                return 'break'
+            delta = (x-gesture['x'])/gesture['scale']
+            stream = self.state.probe.primary_video if self.state.probe else None
+            fps = stream.fps if stream is not None else 0.
+            delta = math.floor(delta*fps+.5)/fps if fps > 0 else round(delta, 6)
+            lower = -min(item.start for item in selected)
+            upper = self.state.duration-max(item.end if item.end is not None else item.start for item in selected)
+            gesture['delta'] = max(lower, min(upper, delta))
+            self._timeline_preview = tuple(clone_segment(item,
+                start=item.start+gesture['delta'],
+                end=None if item.end is None else item.end+gesture['delta'])
+                if item.id in gesture['selected'] else item for item in gesture['snapshot'])
+        self._queue_timeline_draw()
+        return 'break'
+
+    def _timeline_release(self, event):
+        gesture = self._timeline_gesture
+        if gesture is None:
+            return
+        if not self._timeline_gesture_valid(gesture):
+            self._timeline_cancel()
+            return 'break'
+        if gesture['moved'] or gesture['kind'] == 'scrub':
+            self._timeline_motion(event, autoscroll=False)
+        preview = self._timeline_preview
+        self._timeline_gesture = None
+        self._timeline_preview = None
+        self._cancel_timeline_draw()
+        if gesture['kind'] == 'move' and preview is not None and abs(gesture['delta']) > 1e-9:
+            self.state.model._replace(preview)
+            self._changed()
+        else:
+            if gesture['kind'] == 'scrub':
+                self.seek(self._timeline_time(event.x))
+            self._draw_timeline()
+        return 'break'
+
+    def _timeline_cancel(self, _event=None):
+        gesture, self._timeline_gesture = self._timeline_gesture, None
+        self._timeline_preview = None
+        if gesture is not None:
+            if self._timeline_gesture_valid(gesture):
+                self._timeline_select(gesture['before'], active=gesture['before_active'])
+            self._queue_timeline_draw()
+        return 'break'
+
+    def _timeline_key(self, event):
+        if getattr(event, 'state', 0) & 0x4:
+            key = event.keysym.lower()
+            if key == 'a':
+                self._timeline_select(item.id for item in self.state.model.segments)
+            elif key in {'z', 'y'}:
+                if self._timeline_gesture is not None:
+                    self._timeline_cancel()
+                elif not getattr(self.app, 'working', False):
+                    self.undo() if key == 'z' else self.redo()
+            else:
+                return
+            return 'break'
+        if event.keysym == 'Escape':
+            if self._timeline_gesture is not None:
+                return self._timeline_cancel()
+            self._timeline_select(())
+            return 'break'
+        if event.keysym in {'Delete', 'BackSpace'}:
+            if not getattr(self.app, 'working', False):
+                self._timeline_cancel()
+                if self._timeline_selection:
+                    self.delete_active()
+            return 'break'
+
+    def _timeline_context(self, event):
+        if getattr(self.app, 'working', False):
+            return 'break'
+        self._timeline_cancel()
+        self.timeline.focus_set()
+        hit = self._timeline_hit(event.x, event.y)
+        if hit and hit not in self._timeline_selection:
+            self._timeline_select({hit}, active=hit)
+        menu = tk.Menu(self.timeline, tearoff=False, bg=PANEL, fg=TEXT, activebackground=PURPLE)
+        menu.add_command(label='删除所选片段', command=self.delete_active,
+            state='normal' if self._timeline_selection else 'disabled', accelerator='Delete')
+        menu.add_separator()
+        menu.add_command(label='撤销', command=self.undo,
+            state='normal' if self.state.model.history.can_undo else 'disabled', accelerator='Ctrl+Z')
+        menu.add_command(label='重做', command=self.redo,
+            state='normal' if self.state.model.history.can_redo else 'disabled', accelerator='Ctrl+Y')
+        self.timeline_context_menu = menu
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return 'break'
 
     def _draw_timeline(self) -> None:
         if not hasattr(self, "timeline") or not self._alive_view(self.timeline):
             return
         canvas = self.timeline
         canvas.delete("all")
+        self._timeline_items = {}
         width = max(100, canvas.winfo_width())
         height = max(80, canvas.winfo_height())
         duration = self.state.duration
         if duration <= 0:
+            canvas.configure(scrollregion=(0, 0, width, height))
+            canvas.xview_moveto(0)
             canvas.create_text(width / 2, height / 2, text="时间线等待素材", fill=MUTED, font=(UI_FONT, 10))
             return
-        usable = width - 20
+        pps = self._timeline_pps()
+        content_width = max(width, 20.+duration*pps)
+        canvas.configure(scrollregion=(0, 0, content_width, height))
+        left, right = canvas.canvasx(0)-4, canvas.canvasx(width)+4
+        label_font = getattr(self, '_timeline_label_font', None)
+        if label_font is None:
+            self._timeline_label_font = label_font = tkfont.Font(root=canvas, family=UI_FONT, size=8)
         colors = ("#55407f", "#315f73", "#705035", "#3f6d51")
-        for segment in self.state.model.segments:
-            x0 = 10 + segment.start / duration * usable
+        for segment in self._timeline_preview if self._timeline_preview is not None else self.state.model.segments:
+            x0 = 10 + segment.start * pps
             end = segment.start if segment.end is None else segment.end
-            x1 = 10 + end / duration * usable
-            if segment.is_marker:
-                canvas.create_line(x0, 26, x0, height - 20, fill="#ffd166", width=2)
+            x1 = 10 + end * pps
+            if x1 < left or x0 > right:
                 continue
-            active = segment.id == self.state.active_id
-            canvas.create_rectangle(x0, 30, max(x0 + 2, x1), height - 24,
+            active = segment.id in self._timeline_selection
+            if segment.is_marker:
+                item = canvas.create_line(x0, 26, x0, height - 20,
+                    fill='#ffffff' if active else '#ffd166', width=3 if active else 2)
+                self._timeline_items[item] = segment.id
+                continue
+            item = canvas.create_rectangle(max(left, x0), 30, min(right, max(x0 + 2, x1)), height - 24,
                                     fill="#9a67c7" if active else colors[hash(segment.id) % len(colors)],
                                     outline="#ffffff" if active else "#81738d", width=2 if active else 1,
                                     tags=(f"segment:{segment.id}",))
+            self._timeline_items[item] = segment.id
             if x1 - x0 > 60:
-                canvas.create_text(x0 + 4, 40, text=segment.name or "片段", anchor="nw", fill=TEXT, font=(UI_FONT, 8))
-        x = 10 + self.state.current_time / duration * usable
-        canvas.create_line(x, 5, x, height - 8, fill="#ff4f70", width=2)
-        canvas.create_polygon(x - 5, 5, x + 5, 5, x, 14, fill="#ff4f70")
-        canvas.create_text(10, 8, anchor="nw", text=f"0.000  →  {_time(duration)}", fill=MUTED, font=(MONO_FONT, 8))
+                title = (segment.name or '片段')[:60]
+                room = min(right, x1)-max(left, x0)-8
+                low, high = 0, len(title)
+                while low < high:
+                    middle = (low+high+1)//2
+                    if label_font.measure(title[:middle]) <= room:
+                        low = middle
+                    else:
+                        high = middle-1
+                if low:
+                    item = canvas.create_text(max(left, x0) + 4, 40, text=title[:low],
+                        anchor='nw', fill=TEXT, font=label_font)
+                    self._timeline_items[item] = segment.id
+        gesture = self._timeline_gesture
+        if gesture and gesture['kind'] == 'marquee' and gesture['moved']:
+            canvas.create_rectangle(gesture['x'], gesture['y'], *gesture['end'],
+                outline='#72b9ec', dash=(3, 2), tags='timeline-marquee')
+        if gesture and gesture['kind'] == 'scrub' and 'seek' in gesture:
+            value = gesture.pop('seek')
+            self.seek(value)
+        self._draw_timeline_playhead()
+        canvas.create_text(canvas.canvasx(0)+10, 8, anchor='nw',
+            text=f'0.000  →  {_time(duration)}   拖动调整取段 · 空白框选 · Ctrl+滚轮缩放',
+            fill=MUTED, font=(MONO_FONT, 8))
+
+    def _draw_timeline_playhead(self) -> None:
+        if not hasattr(self, 'timeline') or not self._alive_view(self.timeline):
+            return
+        canvas = self.timeline
+        canvas.delete('timeline-head')
+        x = 10.+self.state.current_time*self._timeline_pps()
+        height = max(80, canvas.winfo_height())
+        canvas.create_line(x, 5, x, height-8, fill='#ff4f70', width=2, tags='timeline-head')
+        canvas.create_polygon(x-5, 5, x+5, 5, x, 14, fill='#ff4f70', tags='timeline-head')
 
     def use_current(self) -> None:
         path = self.app.editor_video_var.get().strip()
@@ -832,10 +1139,13 @@ class LosslessWorkspace:
 
     def delete_active(self) -> None:
         try:
+            if getattr(self.app, 'working', False):
+                return
             ids = list(self.segment_tree.selection()) if hasattr(self, "segment_tree") else [self.state.active().id]
             if not ids:
                 raise ValueError("请先在列表中选择片段。")
             self.state.model.remove_many(ids)
+            self._timeline_selection.difference_update(ids)
             self.state.active_id = self.state.model.segments[0].id if self.state.model.segments else None
             self._changed()
         except Exception as exc:
@@ -870,6 +1180,7 @@ class LosslessWorkspace:
 
     def undo(self) -> None:
         try:
+            self._timeline_cancel()
             self.state.model.undo()
             if self.state.active_id and all(item.id != self.state.active_id for item in self.state.model.segments):
                 self.state.active_id = None
@@ -879,6 +1190,7 @@ class LosslessWorkspace:
 
     def redo(self) -> None:
         try:
+            self._timeline_cancel()
             self.state.model.redo()
             self._changed()
         except HistoryError as exc:
@@ -954,7 +1266,7 @@ class LosslessWorkspace:
         self.state.current_time = seconds
         self.time_var.set(_time(seconds))
         self.app._mpv_command_async(["seek", seconds, "absolute+exact"], error_prefix="无损分段定位失败")
-        self._draw_timeline()
+        self._draw_timeline_playhead()
 
     def seek_from_entry(self) -> None:
         try:
@@ -1050,7 +1362,7 @@ class LosslessWorkspace:
 
     def _redraw_playhead(self) -> None:
         self._redraw_after = None
-        self._draw_timeline()
+        self._draw_timeline_playhead()
 
     def _build_output_page(self, page: tk.Frame) -> None:
         panel = self._scrollable(page)

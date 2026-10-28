@@ -41,6 +41,9 @@ MPV_GPU_PLAYBACK_OPTIONS = [
     "--demuxer-max-back-bytes=8MiB",
     "--demuxer-readahead-secs=2",
     "--cache-on-disk=no",
+    # Transport is controlled by the shared master clock. A viewer must not
+    # independently pause for MPV's default one-second cache refill threshold.
+    "--cache-pause=no",
 ]
 
 

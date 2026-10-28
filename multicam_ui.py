@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from bisect import bisect_right
 import math
 import os
 import json
@@ -49,6 +50,10 @@ from transport_controls import TransportControlsMixin
 from workspace_docking import WorkspaceDockingMixin
 from video_stack_ui import VideoStackUIMixin
 from stack_preview_ui import StackPreviewUIMixin
+from timeline_selection import TimelineSelectionMixin
+from timeline_insert import TimelineInsertMixin
+from timeline_merge_ui import TimelineMergeMixin
+from preview_focus import PreviewFocusMixin
 
 BG = '#202124'
 PANEL = '#292b2e'
@@ -62,7 +67,7 @@ COLORS = ['#496e87', '#4b8289', '#667e9e', '#64867c', '#7c718d', '#7e8870', '#80
 VIDEO_TYPES = [('视频', '*.mp4 *.mov *.mkv *.mxf *.avi *.mts *.m2ts *.webm'), ('所有文件', '*.*')]
 
 
-class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDockingMixin, TransportControlsMixin, TimelineInteractionMixin, MulticamProxyMixin, LibraryApplyMixin, AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame):
+class MulticamWorkspace(PreviewFocusMixin, TimelineMergeMixin, TimelineInsertMixin, TimelineSelectionMixin, StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDockingMixin, TransportControlsMixin, TimelineInteractionMixin, MulticamProxyMixin, LibraryApplyMixin, AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent, bg=BG)
         self.app = app
@@ -101,8 +106,10 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         self.timeline_drag = None
         self.subtitle_drag = None
         self._init_timeline_interaction()
+        self._init_timeline_selection()
         self.timeline_subtitle_items = {}
         self.timeline_transition_items = {}
+        self.timeline_audio_items = set()
         self._creative_preview_folder = None
         self._creative_preview_worker = None
         self._creative_preview_sequence = 0
@@ -164,12 +171,15 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         self._build()
         self._init_workspace_docking()
         self._bind_timeline_interaction()
+        self._bind_timeline_selection()
         self._bind_transport_controls()
+        self._init_preview_focus()
         self._loading_fields = False
         for variable in (self.start_var, self.end_var, self.fps_var):
             variable.trace_add('write', self._field_changed)
         self.app.bind('<KeyPress>', self._key, add='+')
         self.after(80, self._poll)
+        self._player_poll_after = self.after(8, self._poll_player)
 
     def _field_changed(self, *args):
         if not self._loading_fields:
@@ -525,7 +535,7 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         self._button(timeline_bar, '适配', self.fit_timeline)
         self._button(timeline_bar, '＋', lambda: self.change_zoom(2))
         self._build_video_stack_control(timeline_bar)
-        tk.Label(timeline_bar, text='素材可拖入 · 中键横移 · Ctrl滚轮缩放', bg=PANEL, fg=MUTED,
+        tk.Label(timeline_bar, text='素材可上下换轨 · 中键拖动画布 · Ctrl滚轮缩放', bg=PANEL, fg=MUTED,
                  font=('Microsoft YaHei UI', 9)).pack(side='right', padx=self._px(10))
         self.timeline = tk.Canvas(timeline_section, bg='#222427', height=self._px(200), highlightthickness=0)
         self.timeline.grid(row=1, column=0, sticky='nsew')
@@ -1209,8 +1219,8 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
                 self.media_tree.insert(parent, 'end', iid=clip.id, text=Path(clip.path).name+' · '+self._clip_camera_label(clip) + suffix,
                                        tags=(tag,) if tag else (),
                                        values=(format_signed_time(clip.start), format_time(clip.duration)))
-        if selection and self.media_tree.exists(selection[0]):
-            self.media_tree.selection_set(selection)
+        selection = tuple(identifier for identifier in selection if self.media_tree.exists(identifier))
+        if selection: self.media_tree.selection_set(selection)
         self.cut_tree.delete(*self.cut_tree.get_children())
         self.cut_camera_combo.configure(values=tuple(str(camera) for camera in self.project.cameras))
         for i, cut in enumerate(self.project.cuts):
@@ -1365,7 +1375,7 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         self.busy=True;self.status.set(f'正在读取 {len(paths)} 个视频机位…')
         self.app.cancel_event.clear();self.app._set_working(True)
         self.app._begin_shared_progress('批量导入机位 0%')
-        existing=tuple(self.project.cameras)
+        existing=tuple(self.project.timeline_cameras)
         cancel=self.app.cancel_event
         def worker():
             try:
@@ -1405,14 +1415,11 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
 
     def remove_clip(self):
         if not self._available(): return
-        clip = self._selected_clip()
-        if not clip: return
-        self._remember()
-        self.project.clips.remove(clip)
-        if hasattr(self.project, 'library_overlays'):
-            self.project.library_overlays = [item for item in self.project.library_overlays if item.source_id != clip.id]
-        self.project.cuts = [c for c in self.project.cuts if c.camera in self.project.cameras]
-        self._refresh()
+        identifiers = set(self.media_tree.selection())
+        keys = {('clip', clip.id) for clip in self.project.clips if clip.id in identifiers}
+        if not keys: return
+        self._set_timeline_selection(keys)
+        self._delete_timeline_selection()
 
     def _select_clip(self, event=None):
         clip = self._selected_clip()
@@ -1785,11 +1792,18 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
             if button.cget('text')!=label: button.configure(text=label)
 
     def _highlight(self, camera):
+        states = getattr(self, '_camera_highlight_states', {})
+        current = {}
         for c, button in self.camera_buttons.items():
             selected = c == camera
+            frame = self.camera_frames[c]
+            state = (button, frame, selected)
+            current[c] = state
+            if states.get(c) == state: continue
             button.configure(bg='#42302f' if selected else PANEL,
                              fg=PINK if selected else INK)
-            self.camera_frames[c].configure(bg=PINK if selected else '#414449')
+            frame.configure(bg=PINK if selected else '#414449')
+        self._camera_highlight_states = current
 
     def _key(self, event):
         if not self.winfo_ismapped(): return
@@ -1807,12 +1821,14 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         if event.keysym.lower() == 'c': self.split_program_at_playhead(); return 'break'
         if event.keysym == 'Escape':
             self._stop_transport_hold()
+            if self._finish_selection_gesture(cancel=True): return 'break'
             if self._timeline_scrubbing:
                 self._timeline_scrubbing = False
                 self._timeline_drag_geometry = None
             if self._end_video_stack_drag(cancel=True): return 'break'
             if self._end_program_boundary_drag(cancel=True): return 'break'
             self.selected_program_range = None
+            self._set_timeline_selection(set(), redraw=False)
             self.creative_panel_refresh()
             self.draw_timeline()
             if vars(self).get('color_workspace'): self.color_workspace.refresh()
@@ -1823,21 +1839,25 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         if event.keysym == 'Right': return self._transport_key_press(1)
 
     def undo(self):
+        if self._finish_selection_gesture(cancel=True): return
         if getattr(self, '_end_video_stack_drag', lambda **_kwargs: False)(cancel=True): return
         if getattr(self, '_end_program_boundary_drag', lambda **_kwargs: False)(cancel=True): return
         if not self._available() or not self.undo_stack: return
         self._cancel_grade_drafts()
         self.redo_stack.append(copy.deepcopy(self.project)); self.project = self.undo_stack.pop()
+        self._restore_timeline_range_fields()
         self.selected_program_range = None
         self.sync_results.clear()
         self._mark_dirty(); self._refresh()
 
     def redo(self):
+        if self._finish_selection_gesture(cancel=True): return
         if getattr(self, '_end_video_stack_drag', lambda **_kwargs: False)(cancel=True): return
         if getattr(self, '_end_program_boundary_drag', lambda **_kwargs: False)(cancel=True): return
         if not self._available() or not self.redo_stack: return
         self._cancel_grade_drafts()
         self.undo_stack.append(copy.deepcopy(self.project)); self.project = self.redo_stack.pop()
+        self._restore_timeline_range_fields()
         self.selected_program_range = None
         self.sync_results.clear()
         self._mark_dirty(); self._refresh()
@@ -2020,20 +2040,75 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
 
     def _scroll_timeline(self, *args):
         self.timeline.xview(*args)
-        self.draw_timeline()
+        self._pin_timeline_headers()
+        self.draw_playhead()
+        self._queue_timeline_redraw()
 
-    def change_zoom(self, factor):
-        self.zoom = min(10000, max(1, self.zoom * factor)); self.draw_timeline()
-        origin = self._timeline_origin()
-        self.timeline.xview_moveto(max(0, (self.current-origin)/max(1, self.project.duration-origin) - 0.3/self.zoom))
+    def change_zoom(self, factor, anchor_x=None):
+        if (self._timeline_drag_geometry is not None
+                or any(getattr(self, name, None) for name in
+                       ('timeline_drag', 'subtitle_drag', '_program_boundary_drag',
+                        '_video_stack_drag', '_selection_gesture', '_timeline_scrubbing'))):
+            return
+        canvas = self.timeline
+        pointer = canvas.winfo_width()*.3 if anchor_x is None else float(anchor_x)
+        origin, old_scale = self._timeline_origin(), self._timeline_scale()
+        anchor_time = origin+(canvas.canvasx(pointer)-self._timeline_left)/old_scale
+        changed = min(10000, max(1, self.zoom*factor))
+        if changed == self.zoom:
+            return
+        self.zoom = changed
+        scale = self._timeline_scale()
+        width = max(canvas.winfo_width(), self._timeline_left+
+                    (self._timeline_view_duration()-origin)*scale+self._px(16))
+        bounds = tuple(float(value) for value in canvas.cget('scrollregion').split())
+        canvas.configure(scrollregion=(0, 0, width, bounds[3] if len(bounds) == 4 else canvas.winfo_height()))
+        target_left = self._timeline_left+(anchor_time-origin)*scale-pointer
+        canvas.xview_moveto(max(0., target_left/max(1., width)))
+        self._pin_timeline_headers()
+        self.draw_playhead()
         self._queue_timeline_redraw()
 
     def fit_timeline(self):
+        if self._timeline_drag_geometry is not None or getattr(self, '_selection_gesture', None):
+            return
         self.zoom = 1; self.timeline.xview_moveto(0); self.draw_timeline()
 
     def pan_timeline(self, event):
         self.timeline.xview_scroll(-3 if event.delta > 0 else 3, 'units')
-        self.draw_timeline(); return 'break'
+        self._pin_timeline_headers()
+        self.draw_playhead()
+        self._queue_timeline_redraw()
+        return 'break'
+
+    def _pin_timeline_headers(self):
+        headers = self.timeline.find_withtag('stack-header')
+        if headers:
+            coordinates = self.timeline.coords(headers[0])
+            if coordinates:
+                self.timeline.move('stack-header', self.timeline.canvasx(0)-coordinates[0], 0)
+
+    def _timeline_fit_label(self, font, title, width):
+        width = max(0, int(width))
+        cache = vars(self).setdefault('_timeline_text_cache', {})
+        key = (str(font), title, width)
+        if key in cache:
+            return cache[key]
+        if font.measure(title) <= width:
+            result = title
+        else:
+            low, high = 0, len(title)
+            while low < high:
+                middle = (low+high+1)//2
+                if font.measure(title[:middle]) <= width:
+                    low = middle
+                else:
+                    high = middle-1
+            result = title[:low]
+        if len(cache) >= 4096:
+            cache.clear()
+        cache[key] = result
+        return result
 
     def _timeline_scale(self):
         if self._timeline_drag_geometry is not None: return self._timeline_drag_geometry[1]
@@ -2067,6 +2142,7 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         self.timeline_program_items = {}
         self.timeline_subtitle_items = {}
         self.timeline_transition_items = {}
+        self.timeline_audio_items = set()
         self._timeline_track_bounds = {}
         label_font = self._timeline_label_font
         title_font = self._timeline_title_font
@@ -2077,6 +2153,7 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         audio_h = max(self._px(28), label_font.metrics('linespace') + self._px(8))
         subtitle_h = max(self._px(30), label_font.metrics('linespace') + self._px(8))
         subtitle_y = ruler_h + program_h + self._px(3)
+        self._timeline_subtitle_bounds = (subtitle_y, subtitle_y+subtitle_h)
         track_top = subtitle_y + subtitle_h + self._px(6)
         minimum_row = label_font.metrics('linespace') + self._px(6)
         available_row = (height - track_top - audio_h - self._px(8)) / max(1, len(cameras))
@@ -2089,6 +2166,11 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         else:
             self.timeline_vscroll.grid_remove()
             canvas.yview_moveto(0)
+        margin = self._px(3)
+        view_left, view_right = canvas.canvasx(0)-margin, canvas.canvasx(canvas.winfo_width())+margin
+        view_top, view_bottom = canvas.canvasy(0)-margin, canvas.canvasy(canvas.winfo_height())+margin
+        def visible(x, y, x2, y2):
+            return x2 >= view_left and x <= view_right and y2 >= view_top and y <= view_bottom
         duration = self._timeline_view_duration()
         canvas.create_rectangle(0, 0, width, ruler_h, fill='#292b2e', outline='')
         canvas.create_rectangle(0, ruler_h, width, ruler_h + program_h, fill='#27292c', outline='')
@@ -2100,11 +2182,31 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
             # committed and _refresh trims them to a shorter programme.
             displayed_project = copy.copy(self.project)
             displayed_project.master_duration = max(self.project.master_duration, self._timeline_drag_geometry[2])
-        displayed_spans = program_spans(displayed_project)
+        # Programme geometry is independent of selection and viewport. Avoid
+        # validation/sorting again for every mouse movement or scroll tick.
+        span_key = (id(self.project), self.project.fps, displayed_project.duration, tuple(cameras),
+                    tuple((item.time, item.camera) for item in self.project.cuts),
+                    tuple(self.project.edit_points),
+                    tuple((item.start, item.end) for item in self.project.clip_grades))
+        cached_spans = vars(self).get('_timeline_span_cache')
+        if cached_spans is None or cached_spans[0] != span_key:
+            cached_spans = self._timeline_span_cache = (span_key, program_spans(displayed_project))
+        displayed_spans = cached_spans[1]
         self._timeline_boundary_times = [span.start for span in displayed_spans if span.start > 0]
+        camera_clips = {camera: [] for camera in cameras}
+        for clip in self.project.clips:
+            camera_clips[clip.camera].append(clip)
+        grades = sorted(self.project.clip_grades, key=lambda item: item.start)
+        grade_starts = [item.start for item in grades]
+        file_states = vars(self).setdefault('_timeline_cache_file_states', {})
+        if len(file_states) > 2048:
+            file_states.clear()
+        checked_at = time.monotonic()
         for span in displayed_spans:
             x = timeline_x(span.start)
             x2 = timeline_x(span.end)
+            if not visible(x, ruler_h, x2, ruler_h+program_h):
+                continue
             chosen = (self.selected_program_range is not None
                 and span.start >= self.selected_program_range[0]-1e-6
                 and span.end <= self.selected_program_range[1]+1e-6)
@@ -2114,14 +2216,28 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
             self.timeline_program_items[item] = (span.start, span.end)
             if x2-x > self._px(24):
                 stabilized = self.project.stabilization_at(span.camera,span.start)
-                stabilization_label = (' · 防抖' if Path(stabilized.cache_path).is_file() else ' · 防抖待重建') if stabilized else ''
-                title=f'{span.camera} · '+self._label_camera(span.camera,span.start).split(' · ',1)[-1] + (' · 调色' if grade_at(self.project, span.start) else '') + stabilization_label
-                while title and title_font.measure(title)>x2-x-self._px(12): title=title[:-1]
+                stabilization_label = ''
+                if stabilized:
+                    path = stabilized.cache_path
+                    state = file_states.get(path)
+                    if state is None or checked_at-state[0] >= 2.:
+                        state = file_states[path] = (checked_at, Path(path).is_file())
+                    stabilization_label = ' · 防抖' if state[1] else ' · 防抖待重建'
+                sources = camera_clips.get(span.camera, ())
+                source = max((clip for clip in sources if clip.start <= span.start < clip.end),
+                             key=lambda clip: (clip.start, clip.id), default=None)
+                if source is None:
+                    source = next(iter(sources), None)
+                camera_title = self._clip_camera_label(source) if source else '未知相机'
+                grade_index = bisect_right(grade_starts, span.start+1e-8)-1
+                graded = grade_index >= 0 and span.start < grades[grade_index].end-1e-8
+                title=f'{span.camera} · '+camera_title + (' · 调色' if graded else '') + stabilization_label
+                title = self._timeline_fit_label(title_font, title, x2-x-self._px(12))
                 item = canvas.create_text(x + self._px(7), ruler_h + program_h / 2,
                     text=title,
                     fill=INK, anchor='w', font=title_font, tags=('program',))
                 self.timeline_program_items[item] = (span.start, span.end)
-        if self.selected_program_range:
+        if self.selected_program_range and ruler_h+program_h >= view_top and ruler_h <= view_bottom:
             x, x2 = (timeline_x(value) for value in self.selected_program_range)
             canvas.create_rectangle(x, ruler_h+self._px(2), x2, ruler_h+program_h-self._px(1),
                 outline=ACCENT, width=max(1,self._px(2)), tags=('selection',))
@@ -2130,11 +2246,15 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
             x2 = timeline_x(transition.time + transition.duration / 2)
             midpoint = timeline_x(transition.time)
             if x2 - x < self._px(10): x, x2 = midpoint - self._px(5), midpoint + self._px(5)
+            if not visible(x, ruler_h, x2, ruler_h+program_h):
+                continue
             item = canvas.create_rectangle(x, ruler_h + self._px(2), x2,
                 ruler_h + program_h - self._px(2), fill='#a18a52', outline='#e3c980', tags=('transition',))
             self.timeline_transition_items[item] = transition.time
         for boundary in self._timeline_boundary_times:
             x = timeline_x(boundary)
+            if not visible(x, ruler_h, x, ruler_h+program_h):
+                continue
             self.timeline.create_line(x, ruler_h+self._px(2), x, ruler_h+program_h-self._px(2),
                 fill='#c0d0dc', width=max(1, self._px(2)), tags=('program-boundary',))
         canvas.create_rectangle(0, subtitle_y, width, subtitle_y + subtitle_h, fill='#2b2831', outline='')
@@ -2145,6 +2265,8 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
             start, end = cue.start + track.offset, cue.end + track.offset
             if end <= 0 or start >= duration: continue
             x, x2 = timeline_x(max(0, start)), timeline_x(min(duration, end))
+            if not visible(x, subtitle_y, x2, subtitle_y+subtitle_h):
+                continue
             item = canvas.create_rectangle(x, subtitle_y + self._px(2), max(x+self._px(2), x2),
                 subtitle_y + subtitle_h - self._px(2), fill='#71578a' if track.enabled else '#414048',
                 outline='#b696d1', tags=('subtitle',))
@@ -2154,11 +2276,11 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
                     text=cue.text.replace('\n', ' · ')[:60], fill=INK, anchor='w', font=label_font,
                     tags=('subtitle',))
                 self.timeline_subtitle_items[item] = cue.id
-        camera_clips = {camera: [] for camera in cameras}
-        for clip in self.project.clips: camera_clips[clip.camera].append(clip)
         for i, camera in enumerate(cameras):
             y = track_top + i * row_h
             self._timeline_track_bounds[camera] = (y, y + row_h)
+            if y+row_h < view_top or y > view_bottom:
+                continue
             canvas.create_rectangle(0, y, width, y + row_h, fill='#25272a' if i % 2 == 0 else '#222427',
                                     outline='')
             canvas.create_text(self._px(8), y + row_h / 2, text=f'V{camera}', fill=MUTED, anchor='w',
@@ -2166,34 +2288,39 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
             for clip in camera_clips[camera]:
                 x = timeline_x(clip.start)
                 x2 = timeline_x(clip.start + clip.duration)
-                if x2 <= x:
+                if x2 <= x or not visible(x, y, x2, y+row_h):
                     continue
                 item = canvas.create_rectangle(x, y + self._px(1), x2, y + row_h - self._px(1),
                                                 fill='#383a3e' if self.project.video_stack_enabled and camera in self.project.video_stack_hidden else COLORS[(camera-1) % 9], outline='#6b7f89', tags=('clip',))
                 self.timeline_clip_items[item] = clip.id
                 if x2-x > self._px(95):
                     title=('α · ' if clip.has_alpha else '')+self._clip_camera_label(clip)+' · '+Path(clip.path).name[:24]
-                    while title and label_font.measure(title)>x2-x-self._px(12): title=title[:-1]
+                    title = self._timeline_fit_label(label_font, title, x2-x-self._px(12))
                     label = canvas.create_text(x + self._px(6), y + row_h / 2, text=title,
                                                 fill=INK, anchor='w', font=label_font, tags=('clip',))
                     self.timeline_clip_items[label] = clip.id
             self._draw_stack_track_header(camera, y, row_h, label_font)
         for point in self.project.edit_points:
             x = timeline_x(point)
+            if not visible(x, track_top, x, audio_y):
+                continue
             canvas.create_line(x, track_top, x, audio_y-self._px(2), fill='#7193aa',
                                dash=(self._px(3), self._px(2)), tags=('edit-boundary',))
         canvas.create_rectangle(0, audio_y, width, audio_y + audio_h, fill='#272c2c', outline='')
         canvas.create_text(self._px(8), audio_y + audio_h / 2, text='A1 主音轨', fill=GREEN, anchor='w',
                            font=label_font)
-        if self.project.master_audio and duration > 0:
+        self._timeline_audio_bounds = (audio_y, audio_y+audio_h)
+        if self.project.master_audio and duration > 0 and audio_y+audio_h >= view_top and audio_y <= view_bottom:
             audio_end = min(duration, self.project.master_duration or duration)
             audio_start = timeline_x(0)
             x2 = timeline_x(audio_end)
-            canvas.create_rectangle(audio_start, audio_y + self._px(3), x2, audio_y + audio_h - self._px(3),
-                                    fill='#3d625c', outline='#5a8178')
+            item = canvas.create_rectangle(audio_start, audio_y + self._px(3), x2, audio_y + audio_h - self._px(3),
+                                           fill='#3d625c', outline='#5a8178')
+            self.timeline_audio_items.add(item)
             if x2-left_edge > self._px(125):
-                canvas.create_text(audio_start + self._px(7), audio_y + audio_h / 2,
-                                   text=Path(self.project.master_audio).name[:58], fill=INK, anchor='w', font=label_font)
+                item = canvas.create_text(audio_start + self._px(7), audio_y + audio_h / 2,
+                                          text=Path(self.project.master_audio).name[:58], fill=INK, anchor='w', font=label_font)
+                self.timeline_audio_items.add(item)
         elif not cameras:
             canvas.create_text(left_edge + self._px(15), ruler_h + program_h / 2, text='导入机位后开始编辑',
                                fill=MUTED, anchor='w', font=title_font)
@@ -2205,7 +2332,8 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         right = canvas.canvasx(canvas.winfo_width())
         tick = max(math.floor(origin/step)*step, math.floor((origin+(left-left_edge)/pps)/step)*step)
         count = 0
-        while timeline_x(tick) <= right + label_width and tick <= duration and count < 500:
+        while (view_top <= ruler_h and timeline_x(tick) <= right + label_width
+               and tick <= duration and count < 500):
             x = timeline_x(tick)
             canvas.create_line(x, ruler_h - self._px(5), x, ruler_h, fill='#63676d')
             canvas.create_text(x + self._px(3), ruler_h / 2, text=format_signed_time(tick) if tick < 0 else format_time(tick), anchor='w', fill=MUTED,
@@ -2213,6 +2341,7 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
             tick += step
             count += 1
         self.draw_playhead()
+        getattr(self, '_draw_timeline_selection', lambda: None)()
 
     def draw_playhead(self):
         self.timeline.delete('head')
@@ -2230,6 +2359,7 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
     def timeline_press(self, event):
         if not self._available(): return
         if self._begin_video_stack_drag(event): return
+        if self._selection_press(event): return
         self._stop_transport_hold()
         self._timeline_scrubbing = False
         self._timeline_drag_geometry = None
@@ -2301,6 +2431,7 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
     def timeline_context(self, event):
         if not self._available(): return
         if self._video_stack_context(event): return
+        if self._selection_context(event): return
         self.timeline.focus_set(); self.pause()
         x, y = self.timeline.canvasx(event.x), self.timeline.canvasy(event.y)
         ids = self.timeline.find_overlapping(x-1, y-1, x+1, y+1)
@@ -2310,7 +2441,13 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         if selected is None:
             span = self._program_span_at(position)
             selected = (span.start, span.end) if span else None
-        if selected is None: return
+        if selected is None:
+            self._show_timeline_insert_menu(event)
+            return
+        if ('program', selected) not in self._timeline_selection:
+            self._set_timeline_selection({('program', selected)}, redraw=False)
+        else:
+            self._set_timeline_selection({key for key in self._timeline_selection if key[0] == 'program'}, redraw=False)
         self.select_program_range(*selected, seek=False)
         self.seek(max(selected[0], min(position, selected[1]-1/self.project.fps)))
         menu = tk.Menu(self, tearoff=False, bg=PANEL, fg=INK, activebackground='#3c5263')
@@ -2339,11 +2476,16 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         enabled = selected[1] < self.project.duration - 1/self.project.fps/2
         menu.add_cascade(label='在片段末尾添加转场', menu=transitions,
                          state='normal' if enabled else 'disabled')
+        self._append_timeline_insert_menu(menu, event)
         self.timeline_context_menu = menu
+        menu.add_separator()
+        menu.add_command(label='删除切点（合并到前段）', accelerator='Delete',
+                         command=self._delete_timeline_selection)
         try: menu.tk_popup(event.x_root, event.y_root)
         finally: menu.grab_release()
 
     def timeline_motion(self, event):
+        if self._selection_motion(event): return
         if self._move_video_stack_drag(event): return
         if self._timeline_scrubbing:
             self.seek(self._timeline_origin()+(self.timeline.canvasx(event.x)-self._timeline_left)/self._timeline_scale())
@@ -2374,6 +2516,7 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         self._queue_timeline_redraw()
 
     def timeline_release(self, event):
+        if self._finish_selection_gesture(): return
         if self._end_video_stack_drag(): return
         if self._timeline_scrubbing:
             self._finish_preview_epoch(seek=False)
@@ -2395,22 +2538,17 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
             if clip is not None: self._reveal_timeline_clip(clip)
         self.timeline_drag = None
 
-    def _poll(self):
+    def _poll_player(self, *, reschedule=True):
         if not self.alive: return
+        self._check_preview_foreground()
+        latest_state = None
         try:
-            while True:
+            for _ in range(2048):
                 kind, payload = self.player_queue.get_nowait()
                 if self._handle_stack_preview_job(kind, payload): continue
                 if kind == 'state':
-                    if self.player is None: continue
-                    if not self._accept_transport_state(payload): continue
-                    self.current = float(payload['time']); self.playing = bool(payload['playing'])
-                    camera = payload.get('camera')
-                    if self.project.video_stack_enabled and self._displayed_camera in self.project.cameras:
-                        camera = self._displayed_camera
-                    self._sync_comparison_state(payload)
-                    self._set_program_label(camera,payload.get('preview',False))
-                    self._highlight(camera); self._show_time(); self.draw_playhead()
+                    if self.player is not None and self._accept_transport_state(payload):
+                        latest_state = payload
                 elif kind == 'program_swap':
                     if self.player is not None and self._show_program_view(payload):
                         self.update_idletasks()
@@ -2425,9 +2563,24 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
                 elif kind == 'error':
                     self.status.set(str(payload)); self.app._log('多机位监看：' + str(payload))
         except queue.Empty: pass
+        if latest_state is not None:
+            payload = latest_state
+            self.current = float(payload['time']); self.playing = bool(payload['playing'])
+            camera = payload.get('camera')
+            if self.project.video_stack_enabled and self._displayed_camera in self.project.cameras:
+                camera = self._displayed_camera
+            self._sync_comparison_state(payload)
+            self._set_program_label(camera,payload.get('preview',False))
+            self._highlight(camera); self._show_time(); self.draw_playhead()
+        if reschedule: self._player_poll_after = self.after(8, self._poll_player)
+
+    def _poll(self):
+        if not self.alive: return
+        self._poll_player(reschedule=False)
         try:
-            while True:
+            for _ in range(64):
                 kind, payload = self.jobs.get_nowait()
+                if self._handle_timeline_merge_job(kind, payload): continue
                 if self._handle_transport_job(kind, payload): continue
                 if kind.startswith('quick_proxy_') and self._handle_quick_proxy_job(kind, payload): continue
                 if self._handle_library_job(kind, payload): continue
@@ -2606,7 +2759,11 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
             '   只有显式切换到“整机位”或“全片”目标时才会调其他片段。\n'
             '   拖动选区两端可修改范围；该页同样支持 C 和逐帧。点“返回剪辑”恢复时间线。\n'
             '8. Ctrl+Z 撤销、Ctrl+Y 重做。保存工程后，点“导出…”设置并导出。\n\n'
-            '媒体库素材可直接拖入时间线；中键拖动或 Shift+滚轮横移，Ctrl+滚轮缩放。\n'
+            '媒体库素材可直接拖入时间线；中键可上下左右拖动画布，Shift+滚轮横移，Ctrl+滚轮缩放。\n'
+            '时间线右键可插入空视频轨道或在此时间插入素材；上方轨道叠在画面顶层。\n'
+            '素材支持上下换轨；Ctrl+左键多选，右键合并会按先后首尾接齐，保留第一段起点。\n'
+            '合并文件保存在软件目录 merged_media，原片保留；Ctrl+Z 可撤销时间线替换。\n'
+            '空格暂停保留解码缓存，继续播放复用；需要主动回收时再点“释放缓存”。\n'
             '透明视频拖入时间线会自动作为顶层叠加；“图层叠加”开启时，上方轨道位于画面上层。\n'
             '拖左侧V轨道标签可上下调序，右键轨道可置顶、下移或隐藏；关闭叠加仍保留原节目切点。\n'
             '叠加模式中，点击监看机位或按数字键只选择该图层的调色目标，不改变合成顺序或写入切点。\n'
@@ -2623,8 +2780,13 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         return self._confirm_discard()
 
     def close(self):
+        self._finish_selection_gesture(cancel=True)
         self.alive = False
+        if getattr(self, '_player_poll_after', None) is not None:
+            self.after_cancel(self._player_poll_after)
+            self._player_poll_after = None
         self._end_video_stack_drag(cancel=True)
+        self._close_preview_focus()
         self._close_workspace_docking()
         self._close_transport_controls()
         self._close_quick_proxy()

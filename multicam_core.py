@@ -131,6 +131,7 @@ class MulticamProject:
     video_stack_enabled: bool = False
     video_stack_order: list[int] = field(default_factory=list)
     video_stack_hidden: list[int] = field(default_factory=list)
+    timeline_empty_tracks: list[int] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -139,6 +140,10 @@ class MulticamProject:
     @property
     def cameras(self) -> list[int]:
         return sorted({clip.camera for clip in self.clips})
+
+    @property
+    def timeline_cameras(self) -> list[int]:
+        return sorted(set(self.cameras) | set(self.timeline_empty_tracks))
 
     def stacked_cameras(self, *, include_hidden=False) -> list[int]:
         """Timeline layers ordered from the topmost picture to the bottom."""
@@ -411,7 +416,8 @@ class MulticamProject:
                 return str(Path(value).resolve())
 
         payload = asdict(self)
-        payload.update(format="okk-multicam", version=8)
+        payload.update(format="okk-multicam", version=9 if self.timeline_empty_tracks else 8)
+        if not self.timeline_empty_tracks: payload.pop("timeline_empty_tracks")
         payload.update(effects_to_dict(self.global_grade, self.camera_grades, self.transitions))
         payload.update(program_edits_to_dict(self))
         payload["subtitles"] = subtitle_track_to_dict(self.subtitles)
@@ -470,12 +476,12 @@ class MulticamProject:
         base = Path(base_directory).resolve()
         try:
             if (not isinstance(payload, dict) or payload.get("format") != "okk-multicam"
-                    or type(payload.get("version")) is not int or payload.get("version") not in {1, 2, 3, 4, 5, 6, 7, 8}):
+                    or type(payload.get("version")) is not int or payload.get("version") not in {1, 2, 3, 4, 5, 6, 7, 8, 9}):
                 raise ValueError("不是受支持的多机位工程")
             allowed = {"format", "version", "clips", "cuts", "master_audio", "master_duration", "fps",
                        "range_start", "range_end", "global_grade", "camera_grades", "transitions", "subtitles",
                        "edit_points", "clip_grades", "stabilizations", "library_overlays", "alignment_reference_camera", "color_reference_camera",
-                       "video_stack_enabled", "video_stack_order", "video_stack_hidden"}
+                       "video_stack_enabled", "video_stack_order", "video_stack_hidden", "timeline_empty_tracks"}
             if set(payload) - allowed:
                 raise ValueError("工程包含未知字段")
 
@@ -530,7 +536,8 @@ class MulticamProject:
                           color_reference_camera=payload.get('color_reference_camera'),
                           video_stack_enabled=payload.get('video_stack_enabled', False),
                           video_stack_order=payload.get('video_stack_order', []),
-                          video_stack_hidden=payload.get('video_stack_hidden', []))
+                          video_stack_hidden=payload.get('video_stack_hidden', []),
+                          timeline_empty_tracks=payload.get('timeline_empty_tracks', []))
             project.validate()
             return project
         except (json.JSONDecodeError, TypeError, KeyError, OverflowError) as exc:

@@ -44,18 +44,15 @@ class VideoStackUIMixin:
         self.project.video_stack_hidden = [camera for camera in self.project.video_stack_hidden if camera not in cameras]
 
     def _timeline_camera_order(self):
-        return (self.project.stacked_cameras(include_hidden=True)
-                if self.project.video_stack_enabled else self.project.cameras)
+        return self.project.stacked_cameras(include_hidden=True)
 
     def _stack_track_at(self, event, *, label_only=True):
-        if not self.project.video_stack_enabled: return None
         if label_only and not 0 <= event.x < self._timeline_left: return None
         y = self.timeline.canvasy(event.y)
         return next((camera for camera, (top, bottom) in self._timeline_track_bounds.items()
                      if top <= y < bottom), None)
 
     def _draw_stack_track_header(self, camera, top, height, font):
-        if not self.project.video_stack_enabled: return
         left = self.timeline.canvasx(0)
         hidden = camera in self.project.video_stack_hidden
         alpha = any(clip.camera == camera and clip.has_alpha for clip in self.project.clips)
@@ -66,7 +63,7 @@ class VideoStackUIMixin:
             fill='#73777e' if hidden else '#73aa9c', anchor='w', font=font, tags=('stack-header',))
 
     def move_video_layer(self, camera, direction):
-        if not self._available() or not self.project.video_stack_enabled: return False
+        if not self._available(): return False
         order = self.project.stacked_cameras(include_hidden=True)
         if camera not in order: return False
         index = order.index(camera)
@@ -80,7 +77,7 @@ class VideoStackUIMixin:
         return True
 
     def toggle_video_layer(self, camera):
-        if not self._available() or camera not in self.project.cameras: return False
+        if not self._available() or camera not in self.project.timeline_cameras: return False
         self._remember()
         hidden = self.project.video_stack_hidden
         if camera in hidden: hidden.remove(camera)
@@ -90,7 +87,7 @@ class VideoStackUIMixin:
         return True
 
     def _video_stack_context(self, event):
-        camera = self._stack_track_at(event, label_only=False)
+        camera = self._stack_track_at(event, label_only=True)
         if camera is None or not self._available(): return False
         self.pause()
         order = self.project.stacked_cameras(include_hidden=True)
@@ -104,6 +101,7 @@ class VideoStackUIMixin:
         menu.add_separator()
         menu.add_command(label='显示图层' if camera in self.project.video_stack_hidden else '隐藏图层',
                          command=lambda: self.toggle_video_layer(camera))
+        self._append_timeline_insert_menu(menu, event)
         self.video_stack_context_menu = menu
         try: menu.tk_popup(event.x_root, event.y_root)
         finally: menu.grab_release()
