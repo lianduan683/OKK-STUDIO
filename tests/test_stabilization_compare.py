@@ -147,7 +147,7 @@ class StabilizationCompareTests(unittest.TestCase):
         self.player.submit('stabilization_compare',enabled=True)
         self.wait(lambda:self.player._comparison.active)
         self.player.close();self.assertTrue(self.player.wait_closed(3))
-        self.assertIsNone(self.player._comparison.controller.process)
+        self.assertIsNone(self.player._comparison.controller)
 
 
 @unittest.skipUnless(os.environ.get('OKK_TEST_MPV_GPU')=='1','set OKK_TEST_MPV_GPU=1 for original/stabilized GPU comparison')

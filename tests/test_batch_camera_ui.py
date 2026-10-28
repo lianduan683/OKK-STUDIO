@@ -288,15 +288,22 @@ class BatchCameraWorkspaceTests(unittest.TestCase):
     def test_all_twenty_tracks_context_choices_and_project_roundtrip(self):
         self.populate()
         workspace = self.workspace
-        self.assertEqual(set(workspace.timeline_clip_items.values()), {clip.id for clip in workspace.project.clips})
+        # Offscreen tracks keep their geometry while Canvas items are created
+        # only for the current viewport.
+        self.assertEqual(set(workspace._timeline_track_bounds), set(range(1, 21)))
+        self.assertTrue(set(workspace.timeline_clip_items.values()) <= {clip.id for clip in workspace.project.clips})
         track_names = {workspace.timeline.itemcget(item, 'text') for item in workspace.timeline.find_all()
                        if workspace.timeline.type(item) == 'text'}
-        self.assertTrue({f'V{camera}' for camera in range(1, 21)} <= track_names)
+        visible_top = workspace.timeline.canvasy(0)
+        visible_bottom = workspace.timeline.canvasy(workspace.timeline.winfo_height())
+        visible_names = {f'V{camera}' for camera, (top, bottom) in workspace._timeline_track_bounds.items()
+                         if bottom >= visible_top and top <= visible_bottom}
+        self.assertTrue(visible_names <= track_names)
         scrollregion = [float(value) for value in workspace.timeline.cget('scrollregion').split()]
         self.assertGreater(scrollregion[3], workspace.timeline.winfo_height())
         self.assertTrue(workspace.timeline_vscroll.winfo_ismapped())
         workspace.timeline.yview_moveto(1.)
-        self.root.update()
+        self.wait_for(lambda: 'clip_20' in workspace.timeline_clip_items.values())
         last_clip = next(item for item, identifier in workspace.timeline_clip_items.items()
                          if identifier == 'clip_20' and workspace.timeline.type(item) == 'rectangle')
         last_coords = workspace.timeline.coords(last_clip)
@@ -304,7 +311,7 @@ class BatchCameraWorkspaceTests(unittest.TestCase):
         self.assertGreaterEqual(visible_y, 0.)
         self.assertLessEqual(visible_y, workspace.timeline.winfo_height())
         workspace.timeline.yview_moveto(0.)
-        self.root.update()
+        self.wait_for(lambda: bool(workspace.timeline_program_items))
         item = next(item for item in workspace.timeline_program_items if workspace.timeline.type(item) == 'rectangle')
         left, top, right, bottom = workspace.timeline.coords(item)
         event = SimpleNamespace(x=(left+right)/2-workspace.timeline.canvasx(0),
