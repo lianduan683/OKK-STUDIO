@@ -33,6 +33,7 @@ class TransitionSegment:
     trim_start_frames: int
     full_start: float
     phase_origin: float | None = None
+    mask_path: str = ''
 
     @property
     def end(self) -> float:
@@ -135,7 +136,8 @@ def plan_creative_segments(project, segments) -> list:
             outgoing, path_a, source_a,
             keep_first / fps, keep_count / fps, keep_count,
             incoming, path_b, source_b,
-            transition.kind, count, keep_first - left, full_start, phase_origin))
+            transition.kind, count, keep_first - left, full_start, phase_origin,
+            getattr(transition, 'mask_path', '')))
         windows.append((left, right))
     if not windows:
         return original
@@ -215,6 +217,10 @@ def build_transition_command(job: TransitionSegment, project, base, settings, wi
     command = list(base) + ["-filter_complex_threads", "1",
                            "-ss", f"{max(0, job.source_start - prefix_seconds):.9f}", "-i", job.path,
                            "-ss", f"{max(0, job.other_source_start - prefix_seconds):.9f}", "-i", job.other_path]
+    if job.mask_path:
+        if not Path(job.mask_path).is_file():
+            raise ValueError('转场遮罩文件缺失：'+job.mask_path)
+        command += ['-loop', '1', '-framerate', rate_text, '-i', job.mask_path]
     trim = (f"trim=start_frame={prefix_frames}:end_frame={prefix_frames + job.full_frames}" if prefix_frames
             else f"trim=end_frame={job.full_frames}")
     normalize = (
@@ -234,8 +240,19 @@ def build_transition_command(job: TransitionSegment, project, base, settings, wi
         grade = normal_effect_filter(project, camera, job.full_start, grade_time=grade_time)
         chain = normalize + ("," + grade if grade else "") + f",format={working_format}"
         graph.append(f"[{index}:v:0]{chain}[camera{index}]")
-    mixed = (f"[camera0][camera1]xfade=transition={transition_filter(job.kind)}:"
-             f"duration={full_duration:.9f}:offset=0,"
+    if job.mask_path:
+        peak = 1023 if '10' in working_format else 255
+        # All mask planes use the same threshold; chroma must not remain at
+        # neutral grey or the two cameras' colours would blend incorrectly.
+        expression = f"{peak}*clip((N/{max(1, job.full_frames-1)}-lum(X,Y)/{peak}*0.90)/0.10,0,1)"
+        graph.append(f"[2:v:0]scale={width}:{height}:out_range=full,format={working_format},"
+                     f"settb=AVTB,setpts=N/({rate_text}*TB),"
+                     f"geq=lum='{expression}':cb='{expression}':cr='{expression}'[wipe]")
+        blend = '[camera0][camera1][wipe]maskedmerge=planes=7'
+    else:
+        blend = (f"[camera0][camera1]xfade=transition={transition_filter(job.kind)}:"
+                 f"duration={full_duration:.9f}:offset=0")
+    mixed = (blend+','+
              f"trim=start_frame={job.trim_start_frames}:end_frame={job.trim_start_frames + job.frames},"
              f"setpts=N/({rate_text}*TB)")
     if ass_path is not None:

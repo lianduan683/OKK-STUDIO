@@ -359,10 +359,22 @@ class CreativePanel(tk.Frame):
         self._note(body, '范围 0.05–5 秒，以切点居中，不改变成片总时长。相邻转场区间不能重叠。').pack(
             fill='x', padx=self.px(10), pady=self.px(6))
         self._actions(body, [('应用转场', self.apply_transition), ('删除转场', self.remove_transition)])
+        mask_button = ttk.Button(body, text='浏览全部库遮罩与缩略图…', command=self._open_mask_library,
+                                  style='Compact.TButton')
+        mask_button.pack(fill='x', padx=self.px(10), pady=self.px(5))
+        if not callable(getattr(self.ws, 'show_effects_library', None)):
+            mask_button.configure(state='disabled')
         self.transition_summary_var = tk.StringVar(self)
         tk.Label(body, textvariable=self.transition_summary_var, bg=PANEL, fg=MUTED,
                  font=FONT, anchor='nw', justify='left', wraplength=self.px(240)).pack(
                      fill='x', padx=self.px(10), pady=self.px(8))
+
+    def _open_mask_library(self):
+        callback = getattr(self.ws, 'show_effects_library', None)
+        if callable(callback):
+            browser = callback()
+            browser.category.set('遮罩转场')
+            browser.query.set('')
 
     def _selected_cut_time(self):
         if self.transition_cut_var.get() not in self._cut_choices:
@@ -687,7 +699,10 @@ class CreativePanel(tk.Frame):
 
 def build_creative_panel(workspace, inspector_tabs):
     """Attach one outer inspector tab and expose refresh/select hooks."""
-    outer = tk.Frame(inspector_tabs, bg=PANEL)
+    # A common workspace ancestor lets the outer panel dock into another
+    # notebook without replacing its widgets or losing edited field values.
+    parent = workspace if isinstance(workspace, tk.Misc) else inspector_tabs
+    outer = tk.Frame(parent, bg=PANEL)
     inspector_tabs.add(outer, text='效果与字幕')
     panel = CreativePanel(outer, workspace)
     panel.pack(fill='both', expand=True)

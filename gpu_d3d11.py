@@ -156,6 +156,13 @@ class D3D11Compositor:
         if not user.GetClientRect(self.parent,C.byref(rectangle)):return self.width,self.height
         return max(16,rectangle.right),max(16,rectangle.bottom)
 
+    def set_visible(self,visible):
+        # Executed on this compositor's owning render thread; never recreates
+        # the swapchain/window or steals focus from a floating panel.
+        if self.window:
+            user=C.WinDLL('user32');user.ShowWindow.argtypes=[W.HWND,C.c_int]
+            user.ShowWindow(self.window,8 if visible else 0)  # SW_SHOWNA / SW_HIDE
+
     def resize(self,width,height):
         width=max(16,min(8192,int(width)));height=max(16,min(8192,int(height)))
         if (width,height)==(self.width,self.height):return False

@@ -39,6 +39,16 @@ from camera_metadata import CameraMetadata, read_camera_metadata
 from auto_color_workspace import AutoColorWorkspaceMixin
 from reference_sync import align_to_camera
 from camera_import import batch_import
+from timeline_interaction import TimelineInteractionMixin
+from proxy_media import validate_proxy_media
+from proxy_cache import register_proxy
+from library_apply import LibraryApplyMixin
+from multicam_proxy import MulticamProxyMixin
+from clip_inspector import ClipInspector
+from transport_controls import TransportControlsMixin
+from workspace_docking import WorkspaceDockingMixin
+from video_stack_ui import VideoStackUIMixin
+from stack_preview_ui import StackPreviewUIMixin
 
 BG = '#202124'
 PANEL = '#292b2e'
@@ -52,13 +62,13 @@ COLORS = ['#496e87', '#4b8289', '#667e9e', '#64867c', '#7c718d', '#7e8870', '#80
 VIDEO_TYPES = [('视频', '*.mp4 *.mov *.mkv *.mxf *.avi *.mts *.m2ts *.webm'), ('所有文件', '*.*')]
 
 
-class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame):
+class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDockingMixin, TransportControlsMixin, TimelineInteractionMixin, MulticamProxyMixin, LibraryApplyMixin, AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent, bg=BG)
         self.app = app
         self.ui_scale = max(1.0, self.winfo_fpixels('1i') / 96.0)
         self._media_width = self._px(304)
-        self._inspector_width = self._px(294)
+        self._inspector_width = self._px(400)
         self._timeline_left = max(self._px(88), tkfont.Font(self, family='Microsoft YaHei UI', size=8).measure('A1 主音轨') + self._px(16))
         self._timeline_label_font = tkfont.Font(self, family='Microsoft YaHei UI', size=8)
         self._timeline_title_font = tkfont.Font(self, family='Microsoft YaHei UI', size=9)
@@ -90,6 +100,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self.view_start = 0.0
         self.timeline_drag = None
         self.subtitle_drag = None
+        self._init_timeline_interaction()
         self.timeline_subtitle_items = {}
         self.timeline_transition_items = {}
         self._creative_preview_folder = None
@@ -101,6 +112,10 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self._displayed_camera = None
         self.camera_page=0
         self.camera_page_var=tk.StringVar(value='1/1')
+        self.camera_rows = self.camera_columns = 3
+        self.camera_rows_var = tk.StringVar(self, value='3')
+        self.camera_columns_var = tk.StringVar(self, value='3')
+        self._camera_grid_layout = None
         self._visible_camera_ids=()
         self._retired_camera_frames={}
         self._init_effects()
@@ -142,7 +157,14 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self._export_started_at = None
         self._export_last_snapshot = {}
         init_delivery_variables(self)
+        self._init_quick_proxy()
+        self._init_video_stack_ui()
+        self._init_stack_preview()
+        self._init_transport_controls()
         self._build()
+        self._init_workspace_docking()
+        self._bind_timeline_interaction()
+        self._bind_transport_controls()
         self._loading_fields = False
         for variable in (self.start_var, self.end_var, self.fps_var):
             variable.trace_add('write', self._field_changed)
@@ -183,6 +205,9 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
 
     def _camera_button_label(self,camera):
         visible=getattr(self,'_visible_camera_ids',())
+        if camera in visible and (self.camera_columns > 3 or self.camera_rows > 3):
+            index = visible.index(camera)+1
+            return f'{index}:{camera}' if index <= 9 and index != camera else str(camera)
         if camera in visible and len(visible)>4:
             model=self._label_camera(camera).split(' · ',1)[-1]
             if model=='未知相机':model='未知'
@@ -193,6 +218,9 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         return self._label_camera(camera)
 
     def _set_program_label(self,camera,preview=False):
+        if self.project.video_stack_enabled and not preview:
+            self.program_var.set(f'图层合成 · {len(self.project.stacked_cameras())} 层 · 选择 V{self._displayed_camera or camera or "—"}')
+            return
         self._displayed_camera = camera
         if preview:
             text = self._label_camera(camera)+' · 效果预览'
@@ -273,6 +301,8 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         style.configure('Multicam.TNotebook', background=PANEL, borderwidth=0)
         style.configure('Multicam.TNotebook.Tab', padding=(self._px(14), self._px(6)))
         style.configure('Multicam.TPanedwindow', background=INPUT, sashwidth=5)
+        style.configure('Inspector.TButton', font=('Microsoft YaHei UI', 9), padding=(self._px(7), self._px(6)))
+        style.configure('Inspector.Multicam.TNotebook.Tab', padding=(self._px(8), self._px(6)))
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         self._media_visible = True
@@ -280,6 +310,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self._layout_initialized = False
 
         bar = tk.Frame(self, bg=PANEL, height=self._px(40))
+        self.workspace_bar = bar
         bar.grid(row=0, column=0, sticky='ew')
         project_menu = tk.Menu(self, tearoff=False, bg=PANEL, fg=INK,
                                activebackground='#3c5263', activeforeground=INK)
@@ -300,8 +331,10 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self.inspector_button.pack(side='right', padx=(self._px(2), self._px(8)), pady=self._px(5))
         ttk.Button(bar, text='导出…', command=self.show_delivery,
                    style='Compact.TButton').pack(side='right', padx=self._px(2), pady=self._px(5))
+        ttk.Button(bar, text='特效库', command=self.show_effects_library,
+                   style='Compact.TButton').pack(side='right', padx=self._px(2), pady=self._px(5))
         for title, section in [('字幕', 'subtitle'), ('转场', 'transition'), ('调色', 'color')]:
-            ttk.Button(bar, text=title, command=lambda key=section: self.show_creative(key),
+            ttk.Button(bar, text=title, command=lambda key=section: self.show_inspector_tool(key),
                        style='Compact.TButton').pack(side='right', padx=self._px(2), pady=self._px(5))
 
         self.workspace_split = ttk.Panedwindow(self, orient='vertical', style='Multicam.TPanedwindow')
@@ -313,8 +346,8 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self.body.add(self.sidebar, weight=0)
         self.tools = ttk.Notebook(self.sidebar, style='Multicam.TNotebook')
         self.tools.pack(fill='both', expand=True, padx=self._px(1), pady=(self._px(0), self._px(1)))
-        media_tab = tk.Frame(self.tools, bg=PANEL)
-        edit_tab = tk.Frame(self.tools, bg=PANEL)
+        media_tab = self.media_tab = tk.Frame(self, bg=PANEL)
+        edit_tab = self.cut_tab = tk.Frame(self, bg=PANEL)
         self.tools.add(media_tab, text='素材')
         self.tools.add(edit_tab, text='切点')
 
@@ -372,8 +405,9 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         line = tk.Frame(edit_tab, bg=PANEL)
         line.pack(fill='x', padx=self._px(8), pady=(self._px(2), self._px(5)))
         self._entry(line, self.cut_time_var, 15).pack(side='left', fill='x', expand=True, ipady=self._px(5))
-        ttk.Combobox(line, textvariable=self.cut_camera_var, values=[str(i) for i in range(1, 10)],
-                     width=3, state='readonly').pack(side='left', padx=(self._px(6), self._px(0)))
+        self.cut_camera_combo = ttk.Combobox(line, textvariable=self.cut_camera_var, values=(),
+                     width=4, state='readonly')
+        self.cut_camera_combo.pack(side='left', padx=(self._px(6), self._px(0)))
         line = tk.Frame(edit_tab, bg=PANEL)
         line.pack(fill='x', padx=self._px(5), pady=(self._px(0), self._px(6)))
         self._button(line, '更新切点', self.edit_cut)
@@ -383,19 +417,22 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self.body.add(self.monitors, weight=1)
         self.monitors.grid_columnconfigure(0, weight=1)
         self.monitors.grid_rowconfigure(0, weight=1)
-        monitor_body = tk.Frame(self.monitors, bg=INPUT)
+        monitor_body = self.monitor_body = tk.Frame(self.monitors, bg=INPUT)
         monitor_body.grid(row=0, column=0, sticky='nsew')
         monitor_body.grid_columnconfigure(0, weight=1, uniform='monitor')
         monitor_body.grid_columnconfigure(1, weight=1, uniform='monitor')
         monitor_body.grid_rowconfigure(0, weight=1)
-        source = tk.Frame(monitor_body, bg=BG)
-        source.grid(row=0, column=0, sticky='nsew', padx=(self._px(0), self._px(2)))
+        source = self.source_panel = tk.Frame(self, bg=BG)
+        source.grid(in_=monitor_body, row=0, column=0, sticky='nsew', padx=(self._px(0), self._px(2)))
         source.grid_columnconfigure(0, weight=1)
         source.grid_rowconfigure(1, weight=1)
-        source_title = tk.Frame(source, bg=PANEL, height=self._px(30))
+        source_title = self.source_title = tk.Frame(source, bg=PANEL, height=self._px(30))
         source_title.grid(row=0, column=0, sticky='ew')
         tk.Label(source_title, text='多机位', bg=PANEL, fg=INK,
                  font=('Microsoft YaHei UI', 10)).pack(side='left', padx=self._px(10), pady=self._px(5))
+        self.release_cache_button = ttk.Button(source_title, text='释放缓存',
+            command=self.unload_preview_cache, style='Compact.TButton')
+        self.release_cache_button.pack(side='right', padx=self._px(3))
         self.camera_pager=tk.Frame(source_title,bg=PANEL)
         self.camera_prev=ttk.Button(self.camera_pager,text='‹',width=2,command=lambda:self._change_camera_page(-1),style='Compact.TButton')
         self.camera_prev.pack(side='left')
@@ -404,13 +441,32 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self.camera_next.pack(side='left')
         self.camera_shortcut_hint=tk.Label(source_title,text='1–9',bg=PANEL,fg=MUTED,font=('Microsoft YaHei UI',9))
         self.camera_shortcut_hint.pack(side='right',padx=self._px(4))
+        proxy_tools = tk.Frame(source, bg=PANEL)
+        proxy_tools.grid(row=1, column=0, sticky='ew')
+        self._build_quick_proxy_controls(proxy_tools)
+        self.camera_grid_toolbar = tk.Frame(source, bg=PANEL)
+        self.camera_grid_toolbar.grid(row=2, column=0, sticky='ew')
+        tk.Label(self.camera_grid_toolbar, text='网格', bg=PANEL, fg=MUTED,
+                 font=('Microsoft YaHei UI', 8)).pack(side='left', padx=(self._px(5), self._px(3)))
+        for label, variable in (('行', self.camera_rows_var), ('列', self.camera_columns_var)):
+            tk.Label(self.camera_grid_toolbar, text=label, bg=PANEL, fg=INK,
+                     font=('Microsoft YaHei UI', 8)).pack(side='left', padx=self._px(2))
+            choice = ttk.Combobox(self.camera_grid_toolbar, textvariable=variable,
+                                 values=tuple(str(value) for value in range(1, 7)), width=2, state='readonly')
+            choice.pack(side='left', padx=self._px(2), pady=self._px(2))
+            choice.bind('<<ComboboxSelected>>', self._apply_camera_grid)
+        tk.Label(self.camera_grid_toolbar, text='1–9 前9格 · 其余点选', bg=PANEL, fg=MUTED,
+                 font=('Microsoft YaHei UI', 8)).pack(side='left', padx=self._px(5))
         self.camera_grid = tk.Frame(source, bg=INPUT)
-        self.camera_grid.grid(row=1, column=0, sticky='nsew')
-        program = tk.Frame(monitor_body, bg=BG)
-        program.grid(row=0, column=1, sticky='nsew', padx=(self._px(2), self._px(0)))
+        source.grid_rowconfigure(1, weight=0)
+        source.grid_rowconfigure(2, weight=0)
+        source.grid_rowconfigure(3, weight=1)
+        self.camera_grid.grid(row=3, column=0, sticky='nsew')
+        program = self.program_panel = tk.Frame(self, bg=BG)
+        program.grid(in_=monitor_body, row=0, column=1, sticky='nsew', padx=(self._px(2), self._px(0)))
         program.grid_columnconfigure(0, weight=1)
         program.grid_rowconfigure(1, weight=1)
-        program_title=tk.Frame(program,bg=PANEL)
+        program_title=self.program_title=tk.Frame(program,bg=PANEL)
         program_title.grid(row=0,column=0,sticky='ew')
         self.compare_button=tk.Checkbutton(program_title,text='防抖对比',variable=self.stabilization_compare_var,
             command=self.toggle_stabilization_compare,bg=PANEL,fg=INK,activebackground=PANEL,activeforeground=INK,
@@ -434,6 +490,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             font=('Microsoft YaHei UI',9),anchor='center')
         self.comparison_stabilized_label=tk.Label(self.program_surface,text='防抖后 · 含裁切',bg=PANEL,fg=ACCENT,
             font=('Microsoft YaHei UI',9),anchor='center')
+        self._build_stack_preview()
         self.audio_surface = tk.Frame(program, bg=BG, width=1, height=1)
         self.audio_surface.place(x=0, y=0, width=1, height=1)
         self.camera_frames = {}
@@ -444,21 +501,21 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         transport = tk.Frame(self.monitors, bg=PANEL)
         transport.grid(row=1, column=0, sticky='ew', pady=(self._px(1), self._px(0)))
         self._button(transport, '监看', self.start_monitors)
-        self._button(transport, '◀|', lambda: self.seek(self.current - 1 / self.project.fps))
+        self._button(transport, '◀|', lambda: self.step_frame(-1))
         self._button(transport, '▶ / Ⅱ', self.toggle)
-        self._button(transport, '|▶', lambda: self.seek(self.current + 1 / self.project.fps))
+        self._button(transport, '|▶', lambda: self.step_frame(1))
         self._button(transport, '回放', self.replay)
         tk.Checkbutton(transport, text='记录', variable=self.record_var, bg=PANEL, fg=PINK,
                        activebackground=PANEL, activeforeground=PINK, selectcolor=INPUT,
                        font=('Microsoft YaHei UI', 9), borderwidth=0).pack(side='left', padx=(self._px(8), self._px(4)))
         self._label(transport, variable=self.time_var).pack(side='right', padx=self._px(9))
 
-        timeline_section = tk.Frame(self.workspace_split, bg=BG, height=self._px(230))
+        timeline_section = tk.Frame(self, bg=BG, height=self._px(230))
         self.timeline_section = timeline_section
         timeline_section.grid_columnconfigure(0, weight=1)
         timeline_section.grid_rowconfigure(1, weight=1)
         self.workspace_split.add(timeline_section, weight=2)
-        timeline_bar = tk.Frame(timeline_section, bg=PANEL)
+        timeline_bar = self.timeline_bar = tk.Frame(timeline_section, bg=PANEL)
         timeline_bar.grid(row=0, column=0, sticky='ew', pady=(self._px(1), self._px(0)))
         tk.Label(timeline_bar, text='时间线', bg=PANEL, fg=INK,
                  font=('Microsoft YaHei UI', 10)).pack(side='left', padx=self._px(10))
@@ -467,7 +524,8 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self._button(timeline_bar, '−', lambda: self.change_zoom(0.5))
         self._button(timeline_bar, '适配', self.fit_timeline)
         self._button(timeline_bar, '＋', lambda: self.change_zoom(2))
-        tk.Label(timeline_bar, text='点击定位 · 拖动素材微调同步', bg=PANEL, fg=MUTED,
+        self._build_video_stack_control(timeline_bar)
+        tk.Label(timeline_bar, text='素材可拖入 · 中键横移 · Ctrl滚轮缩放', bg=PANEL, fg=MUTED,
                  font=('Microsoft YaHei UI', 9)).pack(side='right', padx=self._px(10))
         self.timeline = tk.Canvas(timeline_section, bg='#222427', height=self._px(200), highlightthickness=0)
         self.timeline.grid(row=1, column=0, sticky='nsew')
@@ -488,7 +546,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self.timeline_vscroll.grid_remove()
         self._label(self, variable=self.status).grid(row=3, column=0, sticky='ew', padx=self._px(8), pady=(self._px(4), self._px(3)))
         self._build_inspector()
-        self.color_workspace = ColorWorkspace(self.workspace_split, self)
+        self.color_workspace = ColorWorkspace(self, self)
         self._build_export_monitor()
         self.bind('<Configure>', self._initial_layout, add='+')
         self.after_idle(self._initial_layout)
@@ -527,7 +585,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self._media_visible = not self._media_visible
 
     def _inspector_panel(self, name):
-        outer = tk.Frame(self.inspector_tabs, bg=PANEL)
+        outer = tk.Frame(self, bg=PANEL)
         self.inspector_tabs.add(outer, text=name)
         canvas = tk.Canvas(outer, bg=PANEL, highlightthickness=0, width=self._px(278))
         scrollbar = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
@@ -562,10 +620,14 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
                  font=('Microsoft YaHei UI', 10)).pack(side='left', padx=self._px(12), pady=self._px(7))
         ttk.Button(title, text='关闭', command=self.hide_inspector,
                    style='Compact.TButton').pack(side='right', padx=self._px(4))
-        self.inspector_tabs = ttk.Notebook(self.inspector, style='Multicam.TNotebook')
+        self.inspector_tabs = ttk.Notebook(self.inspector, style='Inspector.Multicam.TNotebook')
         self.inspector_tabs.pack(fill='both', expand=True)
-        self.clip_tab, clip = self._inspector_panel('片段与同步')
-        self.delivery_tab = tk.Frame(self.inspector_tabs, bg=PANEL)
+        self.program_inspector_tab = tk.Frame(self, bg=PANEL)
+        self.inspector_tabs.add(self.program_inspector_tab, text='片段')
+        self.library_tab = tk.Frame(self, bg=PANEL)
+        self.inspector_tabs.add(self.library_tab, text='特效库')
+        self.clip_tab, clip = self._inspector_panel('同步')
+        self.delivery_tab = tk.Frame(self, bg=PANEL)
         self.inspector_tabs.add(self.delivery_tab, text='交付')
         self._section(clip, '同步精调')
         tk.Label(clip,text='对齐参考（固定该轨道）',bg=PANEL,fg=MUTED,font=('Microsoft YaHei UI',9)).pack(
@@ -604,24 +666,38 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
 
         build_delivery_panel(self, self.delivery_tab)
         self.creative_tab = build_creative_panel(self, self.inspector_tabs)
+        self.inspector_tabs.tab(self.creative_tab, text='创作')
+        for position, page in enumerate((self.program_inspector_tab, self.creative_tab,
+                                         self.library_tab, self.clip_tab, self.delivery_tab)):
+            self.inspector_tabs.insert(position, page)
+        self.clip_inspector = ClipInspector(self.program_inspector_tab, self)
+        self.clip_inspector.pack(fill='both', expand=True)
+        self.inspector_tabs.bind('<<NotebookTabChanged>>', self._inspector_tab_changed, add='+')
+        self.library_tab.bind('<Map>', self._ensure_effects_library, add='+')
+
+    def _inspector_tab_changed(self, _event=None):
+        if self.inspector_tabs.select() == str(self.library_tab) and vars(self).get('effects_browser') is None:
+            self.show_effects_library()
 
     def show_inspector(self, section=None):
         if self._inspector_visible and section is None:
             self.hide_inspector()
             return
-        if not self._inspector_visible:
-            self.body.add(self.inspector, weight=0)
-            self._inspector_visible = True
-            self.update_idletasks()
-            panes = self.body.panes()
-            if len(panes) > 1:
-                self.body.sashpos(len(panes) - 2, max(self._px(180), self.body.winfo_width() - min(self._inspector_width, round(self.body.winfo_width() * .28))))
+        if vars(self).get('dock_manager') is None:
+            self._show_inspector_host()
         if section in {'color', 'transition', 'subtitle'}:
-            self.inspector_tabs.select(self.creative_tab)
+            if section == 'color' and self.selected_program_range is not None and not self._color_mode:
+                self.set_grade_target('selection')
+            self._select_workspace_page(self.inspector_tabs, self.creative_tab)
             self.creative_panel.select(section)
+        elif section == 'library':
+            self._select_workspace_page(self.inspector_tabs, self.library_tab)
         else:
-            self.inspector_tabs.select(self.delivery_tab if section == 'delivery' else self.clip_tab)
-        self.inspector_button.configure(text='检查器 ●')
+            self._select_workspace_page(self.inspector_tabs,
+                self.delivery_tab if section == 'delivery' else self.clip_tab
+                if section == 'clip' else self.program_inspector_tab)
+            if vars(self).get('clip_inspector'): self.clip_inspector.refresh()
+        self.inspector_button.configure(text='检查器 ●' if self._inspector_visible else '检查器')
 
     def hide_inspector(self):
         if self._inspector_visible:
@@ -641,6 +717,26 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         else:
             self.exit_color_workspace()
             self._ensure_delivery_height()
+
+    def show_inspector_tool(self, section):
+        self.exit_color_workspace()
+        if section == 'transition':
+            self.show_inspector('edit')
+            self.clip_inspector.scroll_to('transition')
+        else:
+            self.show_inspector(section)
+
+    def show_effects_library(self):
+        from effects_browser import show_effects_browser
+        browser = show_effects_browser(self)
+        self._tag_transport_widgets(browser)
+        return browser
+
+    def _ensure_effects_library(self, _event=None):
+        if not self.alive or vars(self).get('effects_browser') is not None: return
+        from effects_browser import ensure_effects_browser
+        browser = ensure_effects_browser(self)
+        self._tag_transport_widgets(browser)
 
     def _program_span_at(self, time):
         spans = program_spans(self.project)
@@ -676,6 +772,10 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             self.color_workspace.refresh()
         if seek: self.seek(first/fps)
         if self._color_mode: self._audition_grade_target()
+        if vars(self).get('clip_inspector'):
+            self.clip_inspector.refresh()
+            if not self._color_mode and (not self._inspector_visible or self.inspector_tabs.select() == str(self.clip_tab)):
+                self.show_inspector('edit')
         self.status.set(f'已选片段 {format_time(first/fps)} — {format_time(stop/fps)} · C切开 · 数字键切换机位')
 
     def get_selected_grade(self):
@@ -727,6 +827,9 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
 
     def _audition_grade_target(self):
         if self.player:
+            if self.project.video_stack_enabled:
+                self.player.submit('audition', camera=None)
+                return
             camera = (self.project.camera_at(self.selected_program_range[0])
                       if self.grade_target == 'selection' and self.selected_program_range else
                       self.grade_target if isinstance(self.grade_target, int) else None)
@@ -828,10 +931,18 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             if span is not None:
                 self.selected_program_range = (span.start, span.end)
         if not self._color_mode:
-            self._timeline_saved_sash = self.workspace_split.sashpos(0)
-            self.workspace_split.forget(self.timeline_section)
-            self.workspace_split.add(self.color_workspace, weight=3)
+            self._timeline_saved_sash = (self.workspace_split.sashpos(0)
+                if len(self.workspace_split.panes()) > 1 else None)
             self._color_mode = True
+            manager = vars(self).get('dock_manager')
+            if manager is not None:
+                manager.show('grading')
+            else:
+                self.workspace_split.add(self.color_workspace, weight=3)
+            self._color_replaced_timeline = (str(self.color_workspace) in self.workspace_split.panes()
+                and str(self.timeline_section) in self.workspace_split.panes())
+            if self._color_replaced_timeline:
+                self.workspace_split.forget(self.timeline_section)
         self.grade_target = 'selection' if self.selected_program_range else None
         self.set_grade_target(self.grade_target)
         self.creative_panel_refresh()
@@ -845,7 +956,8 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         sash_height = max(0, height - self.body.winfo_height() - color_page.winfo_height())
         # Fit the numeric rows as well as the wheel canvases at the active DPI.
         # Short windows retain a useful viewer and scroll the colour controls.
-        self.workspace_split.sashpos(0, max(self._px(130), height-requested_height-sash_height))
+        if str(self.color_workspace) in self.workspace_split.panes() and len(self.workspace_split.panes()) > 1:
+            self.workspace_split.sashpos(0, max(self._px(130), height-requested_height-sash_height))
         if not self.player and self.project.clips and self.app.mpv_path:
             self.start_monitors()
         self._audition_grade_target()
@@ -855,11 +967,16 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         if not self._color_mode: return
         self._cancel_grade_drafts()
         if self.player: self.player.submit('audition', camera=None)
-        self.workspace_split.forget(self.color_workspace)
-        self.workspace_split.add(self.timeline_section, weight=2)
         self._color_mode = False
+        manager = vars(self).get('dock_manager')
+        if manager is not None:
+            manager.hide('grading')
+        elif str(self.color_workspace) in self.workspace_split.panes():
+            self.workspace_split.forget(self.color_workspace)
+        if vars(self).get('_color_replaced_timeline', True) and not self.timeline_section.winfo_manager():
+            self.workspace_split.add(self.timeline_section, weight=2)
         self.update_idletasks()
-        if self._timeline_saved_sash is not None:
+        if self._timeline_saved_sash is not None and len(self.workspace_split.panes()) > 1:
             self.workspace_split.sashpos(0, self._timeline_saved_sash)
         self.draw_timeline()
 
@@ -918,7 +1035,8 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
 
     def _ensure_delivery_height(self):
         tabs = {str(self.delivery_tab), str(vars(self).get('creative_tab', self.delivery_tab))}
-        if not self._inspector_visible or self.inspector_tabs.select() not in tabs:
+        if (not self._inspector_visible or self.inspector_tabs.select() not in tabs
+                or len(self.workspace_split.panes()) < 2):
             return
         self.update_idletasks()
         available = self.workspace_split.winfo_height()
@@ -1033,6 +1151,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         return next((clip for clip in self.project.clips if selection and clip.id == selection[0]), None)
 
     def _refresh(self, reconfigure=True):
+        self._refresh_video_stack_ui()
         self._cancel_grade_drafts(publishing=reconfigure)
         if self.project.color_reference_camera not in self.project.cameras:self.project.color_reference_camera=None
         if self.project.alignment_reference_camera not in self.project.cameras:
@@ -1093,6 +1212,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         if selection and self.media_tree.exists(selection[0]):
             self.media_tree.selection_set(selection)
         self.cut_tree.delete(*self.cut_tree.get_children())
+        self.cut_camera_combo.configure(values=tuple(str(camera) for camera in self.project.cameras))
         for i, cut in enumerate(self.project.cuts):
             self.cut_tree.insert('', 'end', iid=str(i), values=(format_time(cut.time), f'{cut.camera}'))
         self.master_var.set('主音频：' + Path(self.project.master_audio).name if self.project.master_audio else '未选择主音频（将导出静音）')
@@ -1109,10 +1229,46 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self._schedule_transition_previews()
         self._refresh_camera_labels()
         self._schedule_camera_metadata()
+        if vars(self).get('clip_inspector'): self.clip_inspector.refresh(force=True)
+
+    @staticmethod
+    def _checked_camera_grid(rows, columns):
+        values = []
+        for value in (rows, columns):
+            if isinstance(value, str) and value.isdecimal(): value = int(value)
+            if type(value) is not int or not 1 <= value <= 6:
+                raise ValueError('监看行数和列数必须为 1–6 的整数。')
+            values.append(value)
+        return tuple(values)
+
+    def _apply_camera_grid(self, _event=None):
+        try:
+            self.set_camera_grid(self.camera_rows_var.get(), self.camera_columns_var.get())
+        except (ValueError, tk.TclError) as error:
+            self.camera_rows_var.set(str(self.camera_rows))
+            self.camera_columns_var.set(str(self.camera_columns))
+            self.status.set(str(error))
+
+    def set_camera_grid(self, rows, columns, *, persist=True):
+        rows, columns = self._checked_camera_grid(rows, columns)
+        if (rows, columns) == (self.camera_rows, self.camera_columns): return
+        cameras = tuple(self.project.cameras)
+        visible = self._visible_camera_ids
+        current = self._displayed_camera if self._displayed_camera in visible else (visible[0] if visible else None)
+        self.camera_rows, self.camera_columns = rows, columns
+        self.camera_rows_var.set(str(rows)); self.camera_columns_var.set(str(columns))
+        self.camera_page = cameras.index(current) // (rows*columns) if current in cameras else 0
+        self._build_camera_frames()
+        self._refresh_camera_labels()
+        self.status.set(f'监看 {rows}×{columns} · 每页最多 {rows*columns} 个机位 · 数字 1–9 选择前九格，其余鼠标点选')
+        if persist and vars(self).get('dock_manager'):
+            self._workspace_layout_changed()
 
     def _build_camera_frames(self):
         all_cameras=tuple(self.project.cameras)
-        pages=max(1,math.ceil(len(all_cameras)/9))
+        rows, cols = self.camera_rows, self.camera_columns
+        capacity = rows*cols
+        pages=max(1,math.ceil(len(all_cameras)/capacity))
         self.camera_page=max(0,min(self.camera_page,pages-1))
         self.camera_page_var.set(f'{self.camera_page+1}/{pages}')
         self.camera_prev.configure(state='normal' if self.camera_page>0 else 'disabled')
@@ -1123,38 +1279,45 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         else:
             self.camera_pager.pack_forget()
             self.camera_shortcut_hint.pack(side='right',padx=self._px(4))
-        cameras=all_cameras[self.camera_page*9:(self.camera_page+1)*9]
+        cameras=all_cameras[self.camera_page*capacity:(self.camera_page+1)*capacity]
         self._visible_camera_ids=cameras
-        if tuple(self.camera_frames) == cameras:
+        layout = rows, cols, cameras
+        if self._camera_grid_layout == layout and tuple(self.camera_frames) == cameras:
             return
+        old_windows = {camera: surface.winfo_id() for camera, surface in self.camera_surfaces.items()}
         empty=vars(self).get('_empty_camera_widget')
         if empty is not None and empty.winfo_exists():empty.destroy()
+        can_release = not self.player and self._can_start_transport_monitors(report=False)
         for camera,frame in list(self.camera_frames.items()):
+            if camera in cameras: continue
             frame.grid_forget()
-            if self.player:
+            if not can_release:
                 self._retired_camera_frames[self.camera_surfaces[camera].winfo_id()]=frame
             else:frame.destroy()
-        if not self.player:self._release_camera_frames(list(self._retired_camera_frames))
-        self.camera_frames.clear()
-        self.camera_surfaces.clear()
-        self.camera_buttons.clear()
+            del self.camera_frames[camera]; del self.camera_surfaces[camera]; del self.camera_buttons[camera]
+        if can_release:
+            self._release_camera_frames(list(self._retired_camera_frames))
         if not cameras:
             self._show_empty_media()
-            if self.player:self.player.submit('camera_windows',windows={})
+            self._camera_grid_layout = layout
+            if self.player and old_windows:self.player.submit('camera_windows',windows={})
             return
-        cols = 3 if len(cameras) > 4 else 2
-        rows = math.ceil(len(cameras) / cols)
-        for i in range(3):
+        for i in range(6):
             self.camera_grid.columnconfigure(i, weight=1 if i < cols else 0,
                                              uniform='angle' if i < cols else '', minsize=0)
             self.camera_grid.rowconfigure(i, weight=1 if i < rows else 0,
                                           uniform='angle' if i < rows else '', minsize=0)
         for i, camera in enumerate(cameras):
+            if camera in self.camera_frames:
+                self.camera_frames[camera].grid(row=i // cols, column=i % cols, sticky='nsew', padx=1, pady=1)
+                continue
             frame = tk.Frame(self.camera_grid, bg='#414449', padx=1, pady=1)
+            frame.pack_propagate(False)
             frame.grid(row=i // cols, column=i % cols, sticky='nsew', padx=1, pady=1)
-            surface = tk.Frame(frame, bg='#0e0f10', width=self._px(100), height=self._px(60))
+            surface = tk.Frame(frame, bg='#0e0f10', width=1, height=1)
             surface.pack(fill='both', expand=True)
-            surface.bind('<Button-1>', lambda event, c=camera: self.switch(c) if self._color_mode else None)
+            surface.bind('<Button-1>', lambda event, c=camera: self.switch(c) if self._color_mode or self.project.video_stack_enabled else None)
+            surface.bind('<Button-1>', self._focus_preview, add='+')
             button = tk.Button(frame, text=self._camera_button_label(camera), bg=PANEL, fg=INK,
                                activebackground='#3a4047', activeforeground=INK,
                                relief='flat', borderwidth=0, highlightthickness=0,
@@ -1164,9 +1327,20 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             self.camera_frames[camera] = frame
             self.camera_surfaces[camera] = surface
             self.camera_buttons[camera] = button
-        if self.player:
+            self._tag_transport_widgets(frame)
+        self.camera_frames = {camera: self.camera_frames[camera] for camera in cameras}
+        self.camera_surfaces = {camera: self.camera_surfaces[camera] for camera in cameras}
+        self.camera_buttons = {camera: self.camera_buttons[camera] for camera in cameras}
+        dense = rows > 3 or cols > 3
+        for camera, button in self.camera_buttons.items():
+            button.configure(text=self._camera_button_label(camera), font=('Microsoft YaHei UI', 8 if dense else 9),
+                             pady=1 if dense else 3)
+        self._camera_grid_layout = layout
+        self._highlight(self._displayed_camera if self._displayed_camera in all_cameras else self.project.camera_at(self.current))
+        windows = {camera: surface.winfo_id() for camera, surface in self.camera_surfaces.items()}
+        if self.player and windows != old_windows:
             self.update_idletasks()
-            self.player.submit('camera_windows',windows={camera:surface.winfo_id() for camera,surface in self.camera_surfaces.items()})
+            self.player.submit('camera_windows',windows=windows)
 
     def _release_camera_frames(self,windows):
         for window in windows:
@@ -1175,11 +1349,11 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
 
     def _change_camera_page(self,delta):
         if not self._available():return
-        pages=max(1,math.ceil(len(self.project.cameras)/9))
+        pages=max(1,math.ceil(len(self.project.cameras)/(self.camera_rows*self.camera_columns)))
         page=max(0,min(self.camera_page+delta,pages-1))
         if page==self.camera_page:return
         self.camera_page=page;self._build_camera_frames();self._refresh_camera_labels()
-        self.status.set(f'监看第 {page+1}/{pages} 页 · 数字1–9切换本页机位')
+        self.status.set(f'监看第 {page+1}/{pages} 页 · 数字1–9选择本页前九格，其余鼠标点选')
 
     def add_camera(self):
         if not self._available(): return
@@ -1235,6 +1409,8 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         if not clip: return
         self._remember()
         self.project.clips.remove(clip)
+        if hasattr(self.project, 'library_overlays'):
+            self.project.library_overlays = [item for item in self.project.library_overlays if item.source_id != clip.id]
         self.project.cuts = [c for c in self.project.cuts if c.camera in self.project.cameras]
         self._refresh()
 
@@ -1253,16 +1429,20 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         try: value = parse_signed_timecode(self.offset_var.get())
         except ValueError as exc:
             messagebox.showerror('时间码', str(exc), parent=self); return
-        self._remember();self._move_clip_start(clip,round(value*self.project.fps)/self.project.fps)
+        value = round(value*self.project.fps)/self.project.fps
+        if not self._can_move_timeline_clip(clip, value): return
+        self._remember();self._move_clip_start(clip, value)
         self._refresh()
 
     def _move_clip_start(self,clip,value):
+        if not self._can_move_timeline_clip(clip, value): return False
         delta=value-clip.start
         for item in self.project.stabilizations:
             if item.source_id==clip.id:
                 item.start=max(0.,item.start+delta);item.end+=delta
         self.project.stabilizations=[item for item in self.project.stabilizations if item.end>item.start]
         clip.start=value
+        return True
 
     def nudge(self, frames):
         clip = self._selected_clip()
@@ -1271,13 +1451,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             self.apply_offset()
 
     def choose_proxy(self):
-        if not self._available(): return
-        clip = self._selected_clip()
-        if not clip: return
-        path = filedialog.askopenfilename(parent=self, title='选择同一片段、相同时长的预览代理', filetypes=VIDEO_TYPES)
-        if path:
-            self._remember(); clip.proxy_path = path; self._configure_player()
-            self.status.set('已指定预览代理；最终导出仍读取相机原片。')
+        return self.link_existing_proxy()
 
     def choose_master(self):
         if not self._available(): return
@@ -1317,6 +1491,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         if reference is not None:clips=[item for item in clips if item.camera!=reference]
         if not clips or not ffmpeg or (reference is None and not self.project.master_audio):
             messagebox.showinfo('同步', '请选择待同步素材，以及主音频或一个参考机位；参考机位自身保持固定。', parent=self); return
+        if any(not self._can_move_timeline_clip(item) for item in clips): return
         self.stop_monitors()
         self.busy = True
         self.sync_running = True
@@ -1355,6 +1530,13 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             self.status.set(message)
             self.app.progress_text_var.set(message)
             return
+        for clip_id, result in pairs:
+            clip = next((c for c in self.project.clips if c.id == clip_id), None)
+            if clip is not None and math.isfinite(result.offset_seconds) and result.confidence >= 0.2:
+                target = round(-result.offset_seconds*self.project.fps)/self.project.fps
+                if not self._can_move_timeline_clip(clip, target):
+                    self.app.progress_text_var.set(self.status.get())
+                    return
         self._remember()
         details = []
         placed = []
@@ -1374,7 +1556,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self._refresh()
         self.fit_timeline()
         if not self._media_visible: self.toggle_media_pool()
-        self.tools.select(0)
+        self._select_workspace_page(self.tools, self.media_tab)
         target = placed[0] if placed else review[0] if review else None
         if target:
             self.media_tree.selection_set(target.id)
@@ -1424,6 +1606,13 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
 
     def switch(self, camera):
         if not self._available() or camera not in self.project.cameras: return
+        if self.project.video_stack_enabled:
+            self._displayed_camera = camera
+            self.set_grade_target(camera)
+            self._highlight(camera)
+            self._set_program_label(camera)
+            self.status.set(f'已选图层 V{camera}；可调整整机位调色，合成顺序及原节目切点保留。')
+            return
         if self.selected_program_range is not None:
             self._switch_selected_camera(camera)
             return
@@ -1435,11 +1624,13 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
                 self.player.submit('audition', camera=None)
         elif self.player:
             self.player.submit('audition', camera=camera)
+        self._displayed_camera = camera
         self.program_var.set('成片监看 · '+self._label_camera(camera) + ('' if self.record_var.get() else '（试听）'))
         self._highlight(camera)
 
     def start_monitors(self):
         if not self._available() or not self.project.clips: return
+        if not self._can_start_transport_monitors(): return
         if not self.app.mpv_path:
             messagebox.showerror('监看', '请将 mpv.exe 放入 bin 文件夹。', parent=self); return
         if not self.player:
@@ -1456,6 +1647,9 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self.status.set('正在打开同步监看；多路原片较大时请使用代理。')
 
     def _show_program_view(self, window):
+        if self._stack_preview_active:
+            self._program_front_window = window
+            return True
         if self._gpu_live_active:return False
         view = next((view for view in self.program_views if view.winfo_id() == window), None)
         if view is None: return False
@@ -1464,6 +1658,9 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         return True
 
     def _show_comparison_view(self,window):
+        if self._stack_preview_active:
+            self._comparison_front_window = window
+            return True
         view=next((view for view in self.comparison_views if view.winfo_id()==window),None)
         if view is None:return False
         view.lift();self._comparison_front_window=window
@@ -1486,6 +1683,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
                 if self._gpu_live_active:view.place_forget()
                 else:view.place(relx=0,x=0,y=0,relwidth=1,relheight=1,height=0)
         self._show_program_view(self._program_front_window)
+        self._raise_stack_preview()
         self.update_idletasks()
 
     def toggle_stabilization_compare(self):
@@ -1539,8 +1737,11 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
                 self._schedule_transition_previews()
 
     def stop_monitors(self):
+        self._set_stack_preview_mode(False)
+        self._reset_transport_controls()
         self.clear_grade_preview()
         if self.player:
+            self._track_stopped_player(self.player)
             self.player.close()
             self.player = None
             self.player_queue = queue.Queue()
@@ -1554,6 +1755,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
 
     def toggle(self):
         if not self._available(): return
+        self._stop_transport_hold()
         if not self.player: self.start_monitors()
         if self.player: self.player.submit('pause' if self.playing else 'play')
 
@@ -1570,10 +1772,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             self.player.submit('play')
 
     def seek(self, time):
-        time = max(0.0, min(self.project.duration, float(time)))
-        self.current = round(time * self.project.fps) / self.project.fps
-        if self.player: self.player.submit('seek', time=self.current)
-        self._show_time(); self.draw_playhead()
+        return self._request_transport_seek(time, pause=True)
 
     def seek_text(self):
         try: self.seek(parse_timecode(self.seek_var.get()))
@@ -1594,7 +1793,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
 
     def _key(self, event):
         if not self.winfo_ismapped(): return
-        if isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text, tk.Spinbox, tk.Scale, ttk.Scale)): return
+        if self._transport_input_widget(event.widget): return
         if event.state & 0x4:
             if event.keysym.lower() == 'z': self.undo(); return 'break'
             if event.keysym.lower() == 'y': self.redo(); return 'break'
@@ -1602,11 +1801,17 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             return
         if event.char in '123456789' and event.char:
             index=int(event.char)-1
-            camera=self._visible_camera_ids[index] if index<len(self._visible_camera_ids) else int(event.char) if self.camera_page==0 else None
+            camera=self._visible_camera_ids[index] if index<len(self._visible_camera_ids) else None
             if camera is not None:self.switch(camera)
             return 'break'
         if event.keysym.lower() == 'c': self.split_program_at_playhead(); return 'break'
         if event.keysym == 'Escape':
+            self._stop_transport_hold()
+            if self._timeline_scrubbing:
+                self._timeline_scrubbing = False
+                self._timeline_drag_geometry = None
+            if self._end_video_stack_drag(cancel=True): return 'break'
+            if self._end_program_boundary_drag(cancel=True): return 'break'
             self.selected_program_range = None
             self.creative_panel_refresh()
             self.draw_timeline()
@@ -1614,10 +1819,12 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             self.status.set('已取消片段选中；数字键恢复播放头机位操作。')
             return 'break'
         if event.keysym == 'space': self.toggle(); return 'break'
-        if event.keysym == 'Left': self.pause(); self.seek(self.current - 1/self.project.fps); return 'break'
-        if event.keysym == 'Right': self.pause(); self.seek(self.current + 1/self.project.fps); return 'break'
+        if event.keysym == 'Left': return self._transport_key_press(-1)
+        if event.keysym == 'Right': return self._transport_key_press(1)
 
     def undo(self):
+        if getattr(self, '_end_video_stack_drag', lambda **_kwargs: False)(cancel=True): return
+        if getattr(self, '_end_program_boundary_drag', lambda **_kwargs: False)(cancel=True): return
         if not self._available() or not self.undo_stack: return
         self._cancel_grade_drafts()
         self.redo_stack.append(copy.deepcopy(self.project)); self.project = self.undo_stack.pop()
@@ -1626,6 +1833,8 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self._mark_dirty(); self._refresh()
 
     def redo(self):
+        if getattr(self, '_end_video_stack_drag', lambda **_kwargs: False)(cancel=True): return
+        if getattr(self, '_end_program_boundary_drag', lambda **_kwargs: False)(cancel=True): return
         if not self._available() or not self.redo_stack: return
         self._cancel_grade_drafts()
         self.undo_stack.append(copy.deepcopy(self.project)); self.project = self.redo_stack.pop()
@@ -1641,6 +1850,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
 
     def new(self):
         if not self._available() or not self._confirm_discard(): return
+        self._reset_quick_proxy()
         self.stop_monitors(); self.project = MulticamProject(); self.project_path = ''
         self.selected_program_range = None
         self.camera_page=0
@@ -1662,6 +1872,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         if path:
             try: project = MulticamProject.load(path)
             except Exception as exc: messagebox.showerror('打开工程', str(exc), parent=self); return
+            self._reset_quick_proxy()
             self.stop_monitors(); self.project = project; self.project_path = path; self.dirty = False
             self.selected_program_range = None
             self.camera_page=0
@@ -1813,6 +2024,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self.zoom = min(10000, max(1, self.zoom * factor)); self.draw_timeline()
         origin = self._timeline_origin()
         self.timeline.xview_moveto(max(0, (self.current-origin)/max(1, self.project.duration-origin) - 0.3/self.zoom))
+        self._queue_timeline_redraw()
 
     def fit_timeline(self):
         self.zoom = 1; self.timeline.xview_moveto(0); self.draw_timeline()
@@ -1822,14 +2034,18 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         self.draw_timeline(); return 'break'
 
     def _timeline_scale(self):
+        if self._timeline_drag_geometry is not None: return self._timeline_drag_geometry[1]
         return max(1, self.timeline.winfo_width() - self._timeline_left - self._px(16)) / max(1, self._timeline_view_duration()-self._timeline_origin()) * self.zoom
 
     def _timeline_view_duration(self):
+        if self._timeline_drag_geometry is not None:
+            return max(self.project.duration, self._timeline_drag_geometry[2])
         if self.project.duration > 0: return self.project.duration
         track = self.project.subtitles
         return max((cue.end + track.offset for cue in track.cues), default=0.0)
 
     def _timeline_origin(self):
+        if self._timeline_drag_geometry is not None: return self._timeline_drag_geometry[0]
         return min(0.0, min((clip.start for clip in self.project.clips), default=0.0))
 
     def _timeline_x(self, time):
@@ -1838,21 +2054,24 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
     def draw_timeline(self):
         canvas = self.timeline
         canvas.delete('all')
-        cameras = self.project.cameras
+        cameras = self._timeline_camera_order()
         height = max(self._px(100), canvas.winfo_height())
         left_edge = self._timeline_left
         origin = self._timeline_origin()
         pps = self._timeline_scale()
+        timeline_x = lambda value: left_edge + (value-origin)*pps
         width = max(canvas.winfo_width(), left_edge + (self._timeline_view_duration()-origin) * pps + self._px(16))
         self.timeline_clip_items = {}
         self.timeline_program_items = {}
         self.timeline_subtitle_items = {}
         self.timeline_transition_items = {}
+        self._timeline_track_bounds = {}
         label_font = self._timeline_label_font
         title_font = self._timeline_title_font
         ruler_font = self._timeline_ruler_font
         ruler_h = max(self._px(27), ruler_font.metrics('linespace') + self._px(9))
         program_h = max(self._px(31), title_font.metrics('linespace') + self._px(9))
+        self._timeline_program_bounds = (ruler_h, ruler_h + program_h)
         audio_h = max(self._px(28), label_font.metrics('linespace') + self._px(8))
         subtitle_h = max(self._px(30), label_font.metrics('linespace') + self._px(8))
         subtitle_y = ruler_h + program_h + self._px(3)
@@ -1871,11 +2090,19 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         duration = self._timeline_view_duration()
         canvas.create_rectangle(0, 0, width, ruler_h, fill='#292b2e', outline='')
         canvas.create_rectangle(0, ruler_h, width, ruler_h + program_h, fill='#27292c', outline='')
-        canvas.create_text(self._px(8), ruler_h + program_h / 2, text='节目', fill=INK, anchor='w',
+        canvas.create_text(self._px(8), ruler_h + program_h / 2, text='合成' if self.project.video_stack_enabled else '节目', fill=INK, anchor='w',
                            font=title_font)
-        for span in program_spans(self.project):
-            x = self._timeline_x(span.start)
-            x2 = self._timeline_x(span.end)
+        displayed_project = self.project
+        if self._timeline_drag_geometry is not None:
+            # Keep existing cut/grade boundaries valid until the gesture is
+            # committed and _refresh trims them to a shorter programme.
+            displayed_project = copy.copy(self.project)
+            displayed_project.master_duration = max(self.project.master_duration, self._timeline_drag_geometry[2])
+        displayed_spans = program_spans(displayed_project)
+        self._timeline_boundary_times = [span.start for span in displayed_spans if span.start > 0]
+        for span in displayed_spans:
+            x = timeline_x(span.start)
+            x2 = timeline_x(span.end)
             chosen = (self.selected_program_range is not None
                 and span.start >= self.selected_program_range[0]-1e-6
                 and span.end <= self.selected_program_range[1]+1e-6)
@@ -1893,17 +2120,21 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
                     fill=INK, anchor='w', font=title_font, tags=('program',))
                 self.timeline_program_items[item] = (span.start, span.end)
         if self.selected_program_range:
-            x, x2 = (self._timeline_x(value) for value in self.selected_program_range)
+            x, x2 = (timeline_x(value) for value in self.selected_program_range)
             canvas.create_rectangle(x, ruler_h+self._px(2), x2, ruler_h+program_h-self._px(1),
                 outline=ACCENT, width=max(1,self._px(2)), tags=('selection',))
         for transition in self.project.transitions:
-            x = self._timeline_x(transition.time - transition.duration / 2)
-            x2 = self._timeline_x(transition.time + transition.duration / 2)
-            midpoint = self._timeline_x(transition.time)
+            x = timeline_x(transition.time - transition.duration / 2)
+            x2 = timeline_x(transition.time + transition.duration / 2)
+            midpoint = timeline_x(transition.time)
             if x2 - x < self._px(10): x, x2 = midpoint - self._px(5), midpoint + self._px(5)
             item = canvas.create_rectangle(x, ruler_h + self._px(2), x2,
                 ruler_h + program_h - self._px(2), fill='#a18a52', outline='#e3c980', tags=('transition',))
             self.timeline_transition_items[item] = transition.time
+        for boundary in self._timeline_boundary_times:
+            x = timeline_x(boundary)
+            self.timeline.create_line(x, ruler_h+self._px(2), x, ruler_h+program_h-self._px(2),
+                fill='#c0d0dc', width=max(1, self._px(2)), tags=('program-boundary',))
         canvas.create_rectangle(0, subtitle_y, width, subtitle_y + subtitle_h, fill='#2b2831', outline='')
         canvas.create_text(self._px(8), subtitle_y + subtitle_h / 2, text='S1 字幕', fill='#c4a4e4',
                            anchor='w', font=label_font)
@@ -1911,7 +2142,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         for cue in track.cues:
             start, end = cue.start + track.offset, cue.end + track.offset
             if end <= 0 or start >= duration: continue
-            x, x2 = self._timeline_x(max(0, start)), self._timeline_x(min(duration, end))
+            x, x2 = timeline_x(max(0, start)), timeline_x(min(duration, end))
             item = canvas.create_rectangle(x, subtitle_y + self._px(2), max(x+self._px(2), x2),
                 subtitle_y + subtitle_h - self._px(2), fill='#71578a' if track.enabled else '#414048',
                 outline='#b696d1', tags=('subtitle',))
@@ -1921,28 +2152,32 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
                     text=cue.text.replace('\n', ' · ')[:60], fill=INK, anchor='w', font=label_font,
                     tags=('subtitle',))
                 self.timeline_subtitle_items[item] = cue.id
+        camera_clips = {camera: [] for camera in cameras}
+        for clip in self.project.clips: camera_clips[clip.camera].append(clip)
         for i, camera in enumerate(cameras):
             y = track_top + i * row_h
+            self._timeline_track_bounds[camera] = (y, y + row_h)
             canvas.create_rectangle(0, y, width, y + row_h, fill='#25272a' if i % 2 == 0 else '#222427',
                                     outline='')
             canvas.create_text(self._px(8), y + row_h / 2, text=f'V{camera}', fill=MUTED, anchor='w',
                                font=label_font)
-            for clip in (c for c in self.project.clips if c.camera == camera):
-                x = self._timeline_x(clip.start)
-                x2 = self._timeline_x(clip.start + clip.duration)
+            for clip in camera_clips[camera]:
+                x = timeline_x(clip.start)
+                x2 = timeline_x(clip.start + clip.duration)
                 if x2 <= x:
                     continue
                 item = canvas.create_rectangle(x, y + self._px(1), x2, y + row_h - self._px(1),
-                                                fill=COLORS[(camera-1) % 9], outline='#6b7f89', tags=('clip',))
+                                                fill='#383a3e' if self.project.video_stack_enabled and camera in self.project.video_stack_hidden else COLORS[(camera-1) % 9], outline='#6b7f89', tags=('clip',))
                 self.timeline_clip_items[item] = clip.id
                 if x2-x > self._px(95):
-                    title=self._clip_camera_label(clip)+' · '+Path(clip.path).name[:24]
+                    title=('α · ' if clip.has_alpha else '')+self._clip_camera_label(clip)+' · '+Path(clip.path).name[:24]
                     while title and label_font.measure(title)>x2-x-self._px(12): title=title[:-1]
                     label = canvas.create_text(x + self._px(6), y + row_h / 2, text=title,
                                                 fill=INK, anchor='w', font=label_font, tags=('clip',))
                     self.timeline_clip_items[label] = clip.id
+            self._draw_stack_track_header(camera, y, row_h, label_font)
         for point in self.project.edit_points:
-            x = self._timeline_x(point)
+            x = timeline_x(point)
             canvas.create_line(x, track_top, x, audio_y-self._px(2), fill='#7193aa',
                                dash=(self._px(3), self._px(2)), tags=('edit-boundary',))
         canvas.create_rectangle(0, audio_y, width, audio_y + audio_h, fill='#272c2c', outline='')
@@ -1950,8 +2185,8 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
                            font=label_font)
         if self.project.master_audio and duration > 0:
             audio_end = min(duration, self.project.master_duration or duration)
-            audio_start = self._timeline_x(0)
-            x2 = self._timeline_x(audio_end)
+            audio_start = timeline_x(0)
+            x2 = timeline_x(audio_end)
             canvas.create_rectangle(audio_start, audio_y + self._px(3), x2, audio_y + audio_h - self._px(3),
                                     fill='#3d625c', outline='#5a8178')
             if x2-left_edge > self._px(125):
@@ -1968,8 +2203,8 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         right = canvas.canvasx(canvas.winfo_width())
         tick = max(math.floor(origin/step)*step, math.floor((origin+(left-left_edge)/pps)/step)*step)
         count = 0
-        while self._timeline_x(tick) <= right + label_width and tick <= duration and count < 500:
-            x = self._timeline_x(tick)
+        while timeline_x(tick) <= right + label_width and tick <= duration and count < 500:
+            x = timeline_x(tick)
             canvas.create_line(x, ruler_h - self._px(5), x, ruler_h, fill='#63676d')
             canvas.create_text(x + self._px(3), ruler_h / 2, text=format_signed_time(tick) if tick < 0 else format_time(tick), anchor='w', fill=MUTED,
                                font=ruler_font)
@@ -1992,12 +2227,26 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
 
     def timeline_press(self, event):
         if not self._available(): return
+        if self._begin_video_stack_drag(event): return
+        self._stop_transport_hold()
+        self._timeline_scrubbing = False
+        self._timeline_drag_geometry = None
+        self._cancel_timeline_redraw()
         self.timeline.focus_set()
-        self.pause()
         x = self.timeline.canvasx(event.x)
         self.timeline_drag = None
         self.subtitle_drag = None
+        ruler_end = getattr(self, '_timeline_program_bounds', (self._px(27),))[0]
+        if self.timeline.canvasy(event.y) < ruler_end:
+            self._timeline_scrubbing = True
+            self._begin_preview_epoch()
+            self._capture_timeline_geometry()
+            self.seek(self._timeline_origin()+(x-self._timeline_left)/self._timeline_scale())
+            return
+        self.pause()
         ids = self.timeline.find_overlapping(x-self._px(2), self.timeline.canvasy(event.y)-self._px(2), x+self._px(2), self.timeline.canvasy(event.y)+self._px(2))
+        boundary_dragging = self._begin_program_boundary_drag(event)
+        if boundary_dragging == 'blocked': return
         cue_id = next((self.timeline_subtitle_items[i] for i in reversed(ids) if i in self.timeline_subtitle_items), None)
         if cue_id:
             cue = next(cue for cue in self.project.subtitles.cues if cue.id == cue_id)
@@ -2007,9 +2256,11 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             self.creative_panel.subtitle_tree.see(cue.id)
             self.creative_panel._load_cue()
             self.seek(cue.start + self.project.subtitles.offset)
+            self._capture_timeline_geometry()
             return
         transition_time = next((self.timeline_transition_items[i] for i in reversed(ids)
                                 if i in self.timeline_transition_items), None)
+        if boundary_dragging and transition_time is None: return
         if transition_time is not None:
             selected = next((i for i, cut in enumerate(self.project.cuts)
                              if math.floor(cut.time*self.project.fps+.5) == math.floor(transition_time*self.project.fps+.5)), None)
@@ -2042,10 +2293,12 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             clip = next(c for c in self.project.clips if c.id == clip_id)
             self.media_tree.selection_set(clip.id)
             self.timeline_drag = (clip.id, x, clip.start, False)
+            self._capture_timeline_geometry()
         self.seek(clicked)
 
     def timeline_context(self, event):
         if not self._available(): return
+        if self._video_stack_context(event): return
         self.timeline.focus_set(); self.pause()
         x, y = self.timeline.canvasx(event.x), self.timeline.canvasy(event.y)
         ids = self.timeline.find_overlapping(x-1, y-1, x+1, y+1)
@@ -2089,6 +2342,11 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         finally: menu.grab_release()
 
     def timeline_motion(self, event):
+        if self._move_video_stack_drag(event): return
+        if self._timeline_scrubbing:
+            self.seek(self._timeline_origin()+(self.timeline.canvasx(event.x)-self._timeline_left)/self._timeline_scale())
+            return
+        if self._move_program_boundary_drag(event): return
         if self.subtitle_drag:
             cue_id, x, start, end, changed = self.subtitle_drag
             delta = self.timeline.canvasx(event.x) - x
@@ -2098,25 +2356,41 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             new_start = max(0, round((start + delta/self._timeline_scale()) * self.project.fps) / self.project.fps)
             cue.start, cue.end = new_start, new_start + end - start
             self.subtitle_drag = (cue_id, x, start, end, True)
-            self.draw_timeline()
+            self._queue_timeline_redraw()
             return
         if not self.timeline_drag: return
         clip_id, x, start, changed = self.timeline_drag
         delta = self.timeline.canvasx(event.x)-x
         if abs(delta) < 4 and not changed: return
-        if not changed: self._remember()
         clip = next(c for c in self.project.clips if c.id == clip_id)
-        self._move_clip_start(clip,round((start+delta/self._timeline_scale())*self.project.fps)/self.project.fps)
+        value = round((start+delta/self._timeline_scale())*self.project.fps)/self.project.fps
+        if not self._can_move_timeline_clip(clip, value): return
+        if not changed: self._remember()
+        self._move_clip_start(clip, value)
         self.offset_var.set(format_signed_time(clip.start))
         self.timeline_drag = (clip_id, x, start, True)
-        self.draw_timeline()
+        self._queue_timeline_redraw()
 
     def timeline_release(self, event):
+        if self._end_video_stack_drag(): return
+        if self._timeline_scrubbing:
+            self._finish_preview_epoch(seek=False)
+            self.seek(self._timeline_origin()+(self.timeline.canvasx(event.x)-self._timeline_left)/self._timeline_scale())
+            self._timeline_scrubbing = False
+            self._timeline_drag_geometry = None
+            return
+        if self._end_program_boundary_drag(): return
+        self._cancel_timeline_redraw()
+        self._timeline_drag_geometry = None
         if self.subtitle_drag:
             if self.subtitle_drag[-1]: self._refresh()
             self.subtitle_drag = None
             return
-        if self.timeline_drag and self.timeline_drag[3]: self._refresh()
+        if self.timeline_drag and self.timeline_drag[3]:
+            clip_id = self.timeline_drag[0]
+            self._refresh()
+            clip = next((clip for clip in self.project.clips if clip.id == clip_id), None)
+            if clip is not None: self._reveal_timeline_clip(clip)
         self.timeline_drag = None
 
     def _poll(self):
@@ -2124,10 +2398,14 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         try:
             while True:
                 kind, payload = self.player_queue.get_nowait()
+                if self._handle_stack_preview_job(kind, payload): continue
                 if kind == 'state':
                     if self.player is None: continue
+                    if not self._accept_transport_state(payload): continue
                     self.current = float(payload['time']); self.playing = bool(payload['playing'])
                     camera = payload.get('camera')
+                    if self.project.video_stack_enabled and self._displayed_camera in self.project.cameras:
+                        camera = self._displayed_camera
                     self._sync_comparison_state(payload)
                     self._set_program_label(camera,payload.get('preview',False))
                     self._highlight(camera); self._show_time(); self.draw_playhead()
@@ -2148,6 +2426,31 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
         try:
             while True:
                 kind, payload = self.jobs.get_nowait()
+                if self._handle_transport_job(kind, payload): continue
+                if kind.startswith('quick_proxy_') and self._handle_quick_proxy_job(kind, payload): continue
+                if self._handle_library_job(kind, payload): continue
+                if kind == 'timeline_import_ready':
+                    self._finish_timeline_import(payload); continue
+                if kind == 'timeline_import_error':
+                    self.busy = False; self.app._set_working(False)
+                    text, cancelled = payload
+                    self.status.set('已取消拖入，保留原时间线。' if cancelled else text)
+                    if not cancelled: messagebox.showerror('拖入时间线', text, parent=self)
+                    continue
+                if kind == 'proxy_validated':
+                    self.busy = False
+                    project, identifier, source, path = payload
+                    clip = next((clip for clip in self.project.clips if clip.id == identifier and clip.path == source), None)
+                    if project is self.project and clip is not None:
+                        self._remember(); clip.proxy_path = path
+                        register_proxy(source, path)
+                        self._configure_player()
+                        self.status.set('代理检查通过，已用于预览；最终导出仍读取原片。')
+                    continue
+                if kind == 'proxy_validation_error':
+                    self.busy = False; self.status.set(str(payload))
+                    messagebox.showerror('预览代理不匹配', str(payload), parent=self)
+                    continue
                 if kind=='batch_import_progress':
                     percent,text=payload
                     self.status.set(text);self.app.progress_var.set(percent);self.app.progress_text_var.set(text);continue
@@ -2163,7 +2466,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
                     if not payload:continue
                     self._remember();first=not self.project.clips
                     for camera,info in payload:
-                        self.project.clips.append(CameraClip(uuid.uuid4().hex,camera,info.path,0.,info.duration))
+                        self.project.clips.append(CameraClip(uuid.uuid4().hex,camera,info.path,0.,info.duration,has_alpha=bool(getattr(info,'has_alpha',False))))
                         if not self.project.master_audio and info.has_audio:
                             self.project.master_audio=info.path;self.project.master_duration=info.duration
                     if first:
@@ -2192,7 +2495,7 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
                     start = max((c.start+c.duration for c in self.project.clips if c.camera == camera), default=0)
                     first = not self.project.clips
                     for info in infos:
-                        self.project.clips.append(CameraClip(uuid.uuid4().hex, camera, info.path, start, info.duration))
+                        self.project.clips.append(CameraClip(uuid.uuid4().hex, camera, info.path, start, info.duration,has_alpha=bool(getattr(info,'has_alpha',False))))
                         start += info.duration
                         if not self.project.master_audio and info.has_audio:
                             self.project.master_audio = info.path; self.project.master_duration = info.duration
@@ -2278,11 +2581,16 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
     def help(self):
         messagebox.showinfo('多机位剪辑操作',
             '1. “添加机位”可一次多选视频，每个文件创建一个机位；同机位分段请用“追加”。\n'
-            '   超过9个机位时用监看区左右箭头翻页，数字键1–9切换当前页的机位。\n'
+            '   监看上方可分别选择1–6行、1–6列，最多6×6同屏36机位；超过当前网格容量时左右箭头翻页。\n'
+            '   数字键1–9选择本页前九格，第10–36格请点击机位按钮；网格设置随工作区布局保存。\n'
             '2. “对齐参考”可选主音频或单个机位；参考机位固定，其他机位按其波形对齐。\n'
             '   也可手填片段起点、拖动时间线或逐帧微调；同步不会替换主音频。\n'
             '3. 点“监看”，勾选“记录”，播放时按 1–9 或点击机位按钮记录切点。\n'
-            '4. 空格播放/暂停；←/→逐帧。鼠标定位播放头后按 C 切开，切点会保留。\n'
+            '4. 空格播放/暂停；←/→按下立即暂停并移动一帧，长按连续倒放/正放，松开保持暂停。\n'
+            '   拖动时间线标尺可连续定位；定位播放头后按 C 切开，切点会保留。\n'
+            '   鼠标移到节目轨两段之间，出现左右箭头后按住拖动可移动切点；Esc 取消，Ctrl+Z 撤销。\n'
+            '   切点按帧对齐，两侧至少保留一帧；已有转场会随切点移动并限制可移动范围。\n'
+            '   相邻片段已应用库叠加特效时，请先移除特效，调整切点后重新应用。\n'
             '5. 左键选中“节目”轨道片段后，按 1–9 仅切换所选片段的机位；Esc 取消选中。\n'
             '6. 右键片段可切换机位、进入调色，或在片段末尾与后续片段之间添加转场。\n'
             '   “Gyroflow 防抖”提供自动配置/手动参数，检测并处理所选片段，完成后预览与导出共用。\n'
@@ -2296,8 +2604,17 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
             '   只有显式切换到“整机位”或“全片”目标时才会调其他片段。\n'
             '   拖动选区两端可修改范围；该页同样支持 C 和逐帧。点“返回剪辑”恢复时间线。\n'
             '8. Ctrl+Z 撤销、Ctrl+Y 重做。保存工程后，点“导出…”设置并导出。\n\n'
+            '媒体库素材可直接拖入时间线；中键拖动或 Shift+滚轮横移，Ctrl+滚轮缩放。\n'
+            '透明视频拖入时间线会自动作为顶层叠加；“图层叠加”开启时，上方轨道位于画面上层。\n'
+            '拖左侧V轨道标签可上下调序，右键轨道可置顶、下移或隐藏；关闭叠加仍保留原节目切点。\n'
+            '叠加模式中，点击监看机位或按数字键只选择该图层的调色目标，不改变合成顺序或写入切点。\n'
             '主音频固定连续播放；所选机位停机处输出黑场。代理仅用于监看，导出始终使用原片。\n'
-            '8K 多路监看建议先用原“剪辑工作台 → 1080p代理”生成 ProxyMedia。\n'
+            '8K 多路监看可点“一键1080p代理”，生成期间仍可剪辑；完成后自动挂载，导出始终读取原片。\n'
+            '“释放缓存”回收播放器解码缓存与显存，再加载当前帧并保持暂停，不删除素材或代理。\n'
+            '工作面板可拖动标签/标题浮出窗口，拖到其他面板中心合并标签，四边分割停靠。\n'
+            '“布局 → 面板 → 浮动整个标签组”可一起移出整组；拖动组标题整体停靠，拖动单个标签只移动该页。\n'
+            '浮动窗口关闭会停靠回工作区；“布局”菜单可显示、浮动、隐藏面板或恢复默认布局。\n'
+            '布局独立保存，不改变工程剪辑；精细调色面板也可独立浮动。\n'
             '自动同步调整恒定偏移；长录制时钟漂移需分段检查并单独微调。', parent=self)
 
     def request_close(self):
@@ -2305,6 +2622,12 @@ class MulticamWorkspace(AutoColorWorkspaceMixin, EffectsWorkspaceMixin, tk.Frame
 
     def close(self):
         self.alive = False
+        self._end_video_stack_drag(cancel=True)
+        self._close_workspace_docking()
+        self._close_transport_controls()
+        self._close_quick_proxy()
+        self._library_apply_token = getattr(self, '_library_apply_token', 0) + 1
+        self._close_timeline_interaction()
         self._close_auto_color()
         self._camera_metadata_cancel.set()
         self._close_effects()

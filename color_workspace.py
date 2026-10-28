@@ -350,7 +350,7 @@ class ColorWorkspace(tk.Frame):
         self.range_start_var = tk.StringVar(self, value=format_time(0))
         self.range_end_var = tk.StringVar(self, value=format_time(0))
         self.selection_var = tk.StringVar(self, value='点击片段或拖动选择调色范围')
-        header = tk.Frame(self, bg=PANEL)
+        header = self.header = tk.Frame(self, bg=PANEL)
         header.pack(fill='x')
         tk.Label(header, text='调色 · COLOR', bg=PANEL, fg=INK,
                  font=('Microsoft YaHei UI', 10, 'bold')).pack(side='left', padx=self.px(10), pady=self.px(6))

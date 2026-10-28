@@ -84,7 +84,8 @@ def detect_gpu_export(ffmpeg_path):
 
 
 def find_gpu_export_ffmpeg(app_dir=None):
-    root=Path(app_dir or Path(__file__).resolve().parent)
+    import sys
+    root=Path(app_dir or (Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else Path(__file__).resolve().parent))
     candidates=(root/'bin'/'gpu_export'/'ffmpeg.exe',root/'native_runtime'/'gpu_export_full'/'ffmpeg.exe',
                 root/'native_runtime'/'gpu_export'/'ffmpeg.exe',root/'bin'/'ffmpeg.exe')
     for candidate in candidates:
@@ -214,6 +215,8 @@ def build_gpu_transition_command(job,project,base,settings,width,height,pixel_fo
     """
     from program_edits import grade_at
     from subtitle_core import subtitle_filter
+    if getattr(job, 'mask_path', ''):
+        raise GpuExportUnsupported('资源遮罩转场使用精确缓存合成。')
     if (job.frames<1 or job.full_frames<1 or job.trim_start_frames<0
             or job.trim_start_frames+job.frames>job.full_frames):
         raise ValueError('转场渲染帧范围无效')

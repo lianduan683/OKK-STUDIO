@@ -63,6 +63,7 @@ class Transition:
     time: float
     kind: str = "fade"
     duration: float = 0.5
+    mask_path: str = ''
 
 
 # Public names are intentionally identical to FFmpeg's documented xfade names.
@@ -350,6 +351,10 @@ def validate_transitions(transitions: list[Transition], project=None) -> None:
         _finite(transition.time, "转场时间", 0.0, 1e12)
         _finite(transition.duration, "转场时长", 0.05, 5.0)
         transition_filter(transition.kind)
+        if not isinstance(transition.mask_path, str) or any(c in transition.mask_path for c in '\x00\r\n'):
+            raise ValueError('转场遮罩路径无效')
+        if transition.mask_path and Path(transition.mask_path).suffix.lower() != '.png':
+            raise ValueError('转场遮罩必须是 PNG 文件')
         ordered.append(transition)
     ordered.sort(key=lambda item: item.time)
     previous_end = -math.inf
@@ -381,7 +386,7 @@ def transition_to_dict(transition: Transition) -> dict:
 
 
 def transition_from_dict(value: Mapping) -> Transition:
-    if not isinstance(value, Mapping) or set(value) - {"time", "kind", "duration"} or "time" not in value:
+    if not isinstance(value, Mapping) or set(value) - {"time", "kind", "duration", "mask_path"} or "time" not in value:
         raise ValueError("转场设置结构无效")
     transition = Transition(**dict(value))
     validate_transitions([transition])

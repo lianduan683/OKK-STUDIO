@@ -43,6 +43,9 @@ from program_edits import grade_at
 from gpu_export import (GpuExportUnsupported, find_gpu_export_ffmpeg,
                         build_gpu_video_plan, build_gpu_transition_command)
 from export_parallel import choose_export_workers
+from library_overlay import (LibraryOverlayRange, validate_library_overlay,
+                             overlay_cache_matches, overlay_from_dict)
+from video_stack import ordered_cameras, validate_stack
 
 
 def _number(value, label: str, *, minimum: float | None = None) -> float:
@@ -75,6 +78,7 @@ class CameraClip:
     camera_make: str = ""
     camera_model: str = ""
     camera_metadata_source: str = ""
+    has_alpha: bool = False
 
     @property
     def end(self) -> float:
@@ -120,8 +124,12 @@ class MulticamProject:
     edit_points: list[float] = field(default_factory=list)
     clip_grades: list[ClipGrade] = field(default_factory=list)
     stabilizations: list[StabilizedRange] = field(default_factory=list)
+    library_overlays: list[LibraryOverlayRange] = field(default_factory=list)
     alignment_reference_camera: int | None = None
     color_reference_camera: int | None = None
+    video_stack_enabled: bool = False
+    video_stack_order: list[int] = field(default_factory=list)
+    video_stack_hidden: list[int] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -130,6 +138,10 @@ class MulticamProject:
     @property
     def cameras(self) -> list[int]:
         return sorted({clip.camera for clip in self.clips})
+
+    def stacked_cameras(self, *, include_hidden=False) -> list[int]:
+        """Timeline layers ordered from the topmost picture to the bottom."""
+        return ordered_cameras(self, include_hidden=include_hidden)
 
     def clip_at(self, camera: int, time: float) -> CameraClip | None:
         # If imported files overlap within one camera, the latest recording
@@ -157,6 +169,12 @@ class MulticamProject:
         clip = self.clip_at(camera, time)
         if clip is None: return None
         source_time = max(0.0, time - clip.start)
+        overlay = self.library_overlay_at(camera, time, clip.id)
+        if overlay is not None:
+            if not overlay_cache_matches(overlay, self):
+                raise ValueError('素材叠加缓存已失效，请重新应用或移除所选素材特效。')
+            return (overlay.cache_path, max(0., source_time-overlay.source_start),
+                    ('library-overlay', overlay.cache_path, overlay.signature, clip.id, clip.start))
         stabilized = self.stabilization_at(camera, time, clip.id)
         if (stabilized is not None and cache_matches(stabilized,clip.path)
                 and stabilized.source_start - 1e-6 <= source_time < stabilized.source_end + 1e-6):
@@ -169,6 +187,11 @@ class MulticamProject:
                 proxy = find_proxy(clip.path) or str(Path(clip.path).parent/'ProxyMedia'/(Path(clip.path).stem+'.mp4'))
             if Path(proxy).is_file(): path = proxy
         return path, source_time, (path, clip.id, clip.start)
+
+    def library_overlay_at(self, camera: int, time: float, source_id: str = ''):
+        return next((item for item in reversed(self.library_overlays)
+                     if item.camera == camera and (not source_id or item.source_id == source_id)
+                     and item.start <= time < item.end), None)
 
     def set_cut(self, time: float, camera: int) -> None:
         time = _number(time, "切换时间", minimum=0.0)
@@ -210,6 +233,8 @@ class MulticamProject:
                 raise ValueError("素材 ID 不能为空或重复")
             identifiers.add(clip.id)
             _camera(clip.camera)
+            if type(clip.has_alpha) is not bool:
+                raise ValueError('素材透明通道标记必须是布尔值')
             for value in (clip.camera_make,clip.camera_model,clip.camera_metadata_source):
                 if not isinstance(value,str) or len(value) > 1000 or any(char in value for char in '\x00\r\n'):
                     raise ValueError('相机厂家或型号信息无效')
@@ -222,6 +247,7 @@ class MulticamProject:
             if not math.isfinite(clip.end):
                 raise ValueError("素材终点无效")
         available = set(self.cameras)
+        validate_stack(self)
         if self.alignment_reference_camera is not None:
             if type(self.alignment_reference_camera) is not int or self.alignment_reference_camera not in available:
                 raise ValueError('同步参考机位不存在')
@@ -265,6 +291,23 @@ class MulticamProject:
                 raise ValueError('防抖缓存的源时间没有覆盖所选片段，请重新生成防抖')
         validate_transitions(self.transitions, self)
         validate_subtitle_track(self.subtitles)
+        if not isinstance(self.library_overlays, list) or len(self.library_overlays) > 100000:
+            raise ValueError('素材叠加列表无效')
+        for item in self.library_overlays:
+            validate_library_overlay(item)
+            clip = next((clip for clip in self.clips if clip.id == item.source_id), None)
+            if clip is None or clip.camera != item.camera:
+                raise ValueError('素材叠加引用了不存在的机位或原片')
+            if (item.end > self.duration+1/fps or item.start < clip.start-1/fps
+                    or item.end > clip.end+1/fps or item.start-clip.start < item.source_start-1/fps
+                    or item.end-clip.start > item.source_end+1/fps):
+                raise ValueError('素材叠加缓存未覆盖所选范围，请重新应用或移除素材特效。')
+            for effect in self.transitions:
+                for sample in (effect.time-1/fps, effect.time):
+                    if (item.start <= sample < item.end and self.camera_at(sample) == item.camera
+                            and (effect.time-effect.duration/2-clip.start < item.source_start-1/fps
+                                 or effect.time+effect.duration/2-clip.start > item.source_end+1/fps)):
+                        raise ValueError('素材叠加缓存未覆盖新转场的余量，请重新应用素材特效。')
 
     def segments(self, start: float | None = None, end: float | None = None) -> list[MulticamSegment]:
         self.validate()
@@ -285,6 +328,8 @@ class MulticamProject:
         for item in self.clip_grades:
             protected_edges.update((_frame(item.start, self.fps), _frame(item.end, self.fps)))
         for item in self.stabilizations:
+            protected_edges.update((_frame(item.start, self.fps), _frame(item.end, self.fps)))
+        for item in self.library_overlays:
             protected_edges.update((_frame(item.start, self.fps), _frame(item.end, self.fps)))
         edges.update(protected_edges)
         for clip in self.clips:
@@ -320,11 +365,19 @@ class MulticamProject:
                     raise ValueError('原素材或防抖设置已变化，请重新生成或移除所选片段防抖')
                 source = max(0.0, source-stabilized.source_start)
                 picture_path = stabilized.cache_path
+            overlay = self.library_overlay_at(camera, position, clip.id) if clip else None
+            if overlay is not None:
+                if not overlay_cache_matches(overlay, self, strict=True):
+                    raise ValueError('素材叠加缓存缺失或原片/特效/防抖已变化，请重新应用或移除素材特效。')
+                source = max(0.0, position-clip.start-overlay.source_start)
+                picture_path = overlay.cache_path
             if not result or camera != previous_camera or clip is not previous_clip:
                 phase_origin = position
             preserve_phase = phase_origin if protected_edges else None
             if stabilized is not None:
                 preserve_phase = max(0.0, clip.start+stabilized.source_start)
+            if overlay is not None:
+                preserve_phase = max(0.0, clip.start+overlay.source_start)
             if (result and result[-1].camera == camera and clip is previous_clip
                     and result[-1].path == picture_path
                     and left not in protected_edges):
@@ -339,21 +392,25 @@ class MulticamProject:
             previous_camera = camera
         return result
 
-    def save(self, path: str | Path) -> None:
+    def to_payload(self, base_directory: str | Path) -> dict:
+        """Serialize the complete edit for a standalone or enclosing project.
+
+        File paths are relative to the directory containing that project;
+        no temporary project file or filesystem write is needed.
+        """
         self.validate()
-        destination = Path(path).resolve()
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        base = Path(base_directory).resolve()
 
         def relative(value: str) -> str:
             if not value:
                 return ""
             try:
-                return os.path.relpath(Path(value).resolve(), destination.parent)
+                return os.path.relpath(Path(value).resolve(), base)
             except ValueError:  # Different Windows drive letters.
                 return str(Path(value).resolve())
 
         payload = asdict(self)
-        payload.update(format="okk-multicam", version=6)
+        payload.update(format="okk-multicam", version=8)
         payload.update(effects_to_dict(self.global_grade, self.camera_grades, self.transitions))
         payload.update(program_edits_to_dict(self))
         payload["subtitles"] = subtitle_track_to_dict(self.subtitles)
@@ -369,6 +426,18 @@ class MulticamProject:
             item['cache_path'] = relative(item['cache_path'])
             for name in ('gyro_path', 'lens_path', 'project_path', 'gyroflow_path'):
                 item['settings'][name] = relative(item['settings'][name])
+        for item in payload['library_overlays']:
+            for name in ('asset_path', 'cache_path'):
+                item[name] = relative(item[name])
+        for item in payload['transitions']:
+            if 'mask_path' in item:
+                item['mask_path'] = relative(item['mask_path'])
+        return payload
+
+    def save(self, path: str | Path) -> None:
+        destination = Path(path).resolve()
+        payload = self.to_payload(destination.parent)
+        destination.parent.mkdir(parents=True, exist_ok=True)
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=destination.parent,
@@ -390,19 +459,29 @@ class MulticamProject:
             raise ValueError("工程文件过大")
         try:
             payload = json.loads(source.read_text(encoding="utf-8-sig"))
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            raise ValueError(f"工程文件损坏：{exc}") from exc
+        return cls.from_payload(payload, source.parent)
+
+    @classmethod
+    def from_payload(cls, payload: dict, base_directory: str | Path) -> MulticamProject:
+        """Restore and validate an embedded edit without mutating its payload."""
+        base = Path(base_directory).resolve()
+        try:
             if (not isinstance(payload, dict) or payload.get("format") != "okk-multicam"
-                    or type(payload.get("version")) is not int or payload.get("version") not in {1, 2, 3, 4, 5, 6}):
+                    or type(payload.get("version")) is not int or payload.get("version") not in {1, 2, 3, 4, 5, 6, 7, 8}):
                 raise ValueError("不是受支持的多机位工程")
             allowed = {"format", "version", "clips", "cuts", "master_audio", "master_duration", "fps",
                        "range_start", "range_end", "global_grade", "camera_grades", "transitions", "subtitles",
-                       "edit_points", "clip_grades", "stabilizations", "alignment_reference_camera", "color_reference_camera"}
+                       "edit_points", "clip_grades", "stabilizations", "library_overlays", "alignment_reference_camera", "color_reference_camera",
+                       "video_stack_enabled", "video_stack_order", "video_stack_hidden"}
             if set(payload) - allowed:
                 raise ValueError("工程包含未知字段")
 
             def absolute(value):
                 if not isinstance(value, str) or "\x00" in value:
                     raise ValueError("工程中的文件路径无效")
-                return str((source.parent / value).resolve()) if value else ""
+                return str((base / value).resolve()) if value else ""
 
             raw_clips = payload.get("clips", [])
             raw_cuts = payload.get("cuts", [])
@@ -423,6 +502,9 @@ class MulticamProject:
                 key: payload[key] for key in ("edit_points", "clip_grades") if key in payload})
             for item in [grade, *camera_grades.values(), *(item.grade for item in clip_grades)]:
                 item.lut_path = absolute(item.lut_path)
+            for item in transitions:
+                if hasattr(item, 'mask_path'):
+                    item.mask_path = absolute(item.mask_path)
             subtitles = subtitle_track_from_dict(payload.get("subtitles", {}))
             subtitles.source_path = absolute(subtitles.source_path)
             stabilizations = []
@@ -430,6 +512,10 @@ class MulticamProject:
             if not isinstance(raw_stabilizations, list): raise ValueError('防抖设置必须是列表')
             for item in raw_stabilizations:
                 stabilizations.append(range_from_dict(item,absolute=absolute))
+            raw_overlays = payload.get('library_overlays', [])
+            if not isinstance(raw_overlays, list):
+                raise ValueError('素材叠加必须是列表')
+            overlays = [overlay_from_dict(item, absolute) for item in raw_overlays]
             project = cls(clips=clips, cuts=cuts,
                           master_audio=absolute(payload.get("master_audio", "")),
                           master_duration=payload.get("master_duration", 0.0),
@@ -438,8 +524,12 @@ class MulticamProject:
                           range_end=payload.get("range_end"), global_grade=grade,
                           camera_grades=camera_grades, transitions=transitions, subtitles=subtitles,
                           edit_points=edit_points, clip_grades=clip_grades, stabilizations=stabilizations,
+                          library_overlays=overlays,
                           alignment_reference_camera=payload.get('alignment_reference_camera'),
-                          color_reference_camera=payload.get('color_reference_camera'))
+                          color_reference_camera=payload.get('color_reference_camera'),
+                          video_stack_enabled=payload.get('video_stack_enabled', False),
+                          video_stack_order=payload.get('video_stack_order', []),
+                          video_stack_hidden=payload.get('video_stack_hidden', []))
             project.validate()
             return project
         except (json.JSONDecodeError, TypeError, KeyError, OverflowError) as exc:
@@ -564,18 +654,22 @@ def render_multicam(
 
     ``run_process(command, callback)`` uses the application's existing process
     registration/cancellation runner and returns ``(returncode, diagnostics)``.
-    Each command opens at most one camera file.  Temporary files and an atomic
+    Normal commands open one camera; stack jobs open their active layers.
+    Temporary files and an atomic
     final replacement keep an existing destination intact on failure/cancel.
     """
     project.validate()
     # The UI stores a rounded decimal (e.g. 59.94006). Use one canonical clock
     # for frame selection, seeks, task boundaries, and encoded stream timing.
     project = replace(project, fps=float(canonical_frame_rate(project.fps)))
-    segments = project.segments()
+    from video_stack_render import plan_stack_segments, validate_stack_media, build_stack_command
+    stacked = project.video_stack_enabled
+    segments = plan_stack_segments(project) if stacked else project.segments()
     if not segments:
         raise ValueError("请先添加相机素材")
-    segments = plan_creative_segments(project, segments)
-    segments = coalesce_render_segments(project, segments)
+    if not stacked:
+        segments = plan_creative_segments(project, segments)
+        segments = coalesce_render_segments(project, segments)
     for grade in [project.global_grade, *project.camera_grades.values(),
                   *(item.grade for item in project.clip_grades)]:
         validate_grade(grade)
@@ -587,6 +681,8 @@ def render_multicam(
     if project.master_audio:
         protected.add(Path(project.master_audio).resolve())
     protected.update(Path(item.cache_path).resolve() for item in project.stabilizations)
+    protected.update(Path(value).resolve() for item in project.library_overlays
+                     for value in (item.cache_path, item.asset_path))
     if destination in protected:
         raise ValueError("成片输出不能覆盖原素材、代理或主音频")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -605,10 +701,14 @@ def render_multicam(
             media[clip.path] = probe_media(ffprobe, clip.path)
     reference = media[project.clips[0].path]
     for segment in segments:
-        for picture in (segment.path, getattr(segment, 'other_path', None)):
+        pictures = ([layer.path for layer in segment.layers] if stacked else
+                    (segment.path, getattr(segment, 'other_path', None)))
+        for picture in pictures:
             if picture and picture not in media:
                 if not Path(picture).is_file(): raise ValueError('防抖或转场素材不存在：' + picture)
                 media[picture] = probe_media(ffprobe, picture)
+    if stacked:
+        validate_stack_media(segments, media)
     if reference.width <= 0 or reference.height <= 0:
         raise ValueError("无法读取素材画面尺寸")
     height = _resolution_height(settings.resolution) or reference.height
@@ -679,16 +779,22 @@ def render_multicam(
         audio_path = ""
     base = [str(ffmpeg), "-hide_banner", "-y", "-loglevel", "warning",
             "-stats_period", "0.25", "-progress", "pipe:1", "-nostats"]
-    gpu_effect_ffmpeg = (find_gpu_export_ffmpeg() if settings.decode_mode == 'cuda'
+    gpu_effect_ffmpeg = (find_gpu_export_ffmpeg() if not stacked and settings.decode_mode == 'cuda'
         and settings.codec.endswith('_nvenc') and Path(ffmpeg).is_file() else '')
     workers = getattr(settings, "parallel_workers", 1)
     if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 4:
         raise ValueError("并行编码数量请选择 1 到 4。")
     workers=choose_export_workers(settings,caps,media,output_size=(width,height))
+    if stacked:
+        # A stack already decodes several cameras concurrently. Bound the
+        # number of concurrent stacks so 36-camera work cannot multiply into
+        # four independent 36-decoder jobs and exhaust memory.
+        active_layers = max((len(segment.layers) for segment in segments), default=0)
+        workers = min(workers, max(1, 8 // max(1, active_layers)))
     needs_phase = any(getattr(segment, "phase_origin", None) is not None
                       and segment.phase_origin < segment.start - .5 / project.fps for segment in segments)
-    source_rates = probe_partition_rates(ffprobe, media, cancel_event) if workers > 1 or needs_phase else {}
-    if workers > 1:
+    source_rates = probe_partition_rates(ffprobe, media, cancel_event) if stacked or workers > 1 or needs_phase else {}
+    if workers > 1 and not stacked:
         segments = [chunk for segment in segments for chunk in (
             [segment] if isinstance(segment, TransitionSegment) else
             partition_render_segments([segment], project.fps, workers, source_frame_rates=source_rates))]
@@ -840,6 +946,19 @@ def render_multicam(
             if isinstance(segment, TransitionSegment):
                 command = build_transition_command(segment, project, base, settings, width, height,
                     pixel_format, rate_text, encode_args, chunk, ass_path, source_frame_rates=source_rates)
+            if stacked:
+                command = build_stack_command(segment, project, base, width, height,
+                    pixel_format, rate_text, encode_args, chunk, ass_path,
+                    source_frame_rates=source_rates, media_by_path=media)
+                # Dozens of layers plus curves/LUT paths can exceed Windows'
+                # command-line length limit. Keep the full graph in this
+                # export's temporary directory instead of on the command line.
+                graph_index = command.index('-filter_complex')
+                graph_path = temporary / f'stack_{index:06d}.filtergraph'
+                graph_path.write_text(command[graph_index+1], encoding='utf-8')
+                command[graph_index:graph_index+2] = ['-/filter_complex', str(graph_path)]
+                phase = (f'合成 {len(segment.layers)} 层画面（任务 {index + 1}/{len(segments)}）'
+                         + (' · NVENC 编码' if settings.codec.endswith('_nvenc') else ' · 软件编码'))
             fallback_command = command
             gpu_commands = []
             if gpu_effect_ffmpeg and segment.path and (isinstance(segment, TransitionSegment) or cuda_filter is None):

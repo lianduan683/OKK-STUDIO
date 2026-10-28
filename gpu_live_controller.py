@@ -153,15 +153,20 @@ class GpuLiveSession:
             raise ValueError('GPU 预览尺寸必须为正整数。')
         return self.request('resize', width=width, height=height)
 
+    def set_visible(self, visible):
+        if type(visible) is not bool: raise ValueError('GPU 可见状态必须为布尔值。')
+        return self.request('set_visible', visible=visible)
+
     def screenshot(self, path):
         return self.request('screenshot', path=str(Path(path).resolve()))
 
     def close(self):
-        if self._closed: return
+        if self._closed and self._backend is None: return
         self._closed = True
         self._leases.clear()
-        backend, self._backend = self._backend, None
-        if backend is not None: backend.close()
+        if self._backend is not None:
+            self._backend.close()
+            self._backend = None
 
 
 class TextureController:
@@ -178,6 +183,8 @@ class TextureController:
         self._acquired = False
         self._released = False
         self._frame_floor = -1
+        self._seek_floor = None
+        self.operation_cancel_event = None
         self.preview_end_seconds = None
 
     @property
@@ -190,6 +197,8 @@ class TextureController:
             self._acquired = True
 
     def command(self, command, timeout=3.):
+        if self.operation_cancel_event is not None and self.operation_cancel_event.is_set():
+            raise RuntimeError('GPU 预览定位已取消。')
         self.start()
         if command[:2] == ['set_property', 'glsl-shader-opts']:
             return self.session.grade(self.slot, command[2])
@@ -198,7 +207,9 @@ class TextureController:
         if command == ['quit']:
             self.stop(); return None
         if command and command[0] == 'seek':
-            self._frame_floor = int(self.session.frame_state(self.slot, timeout=min(.5, timeout)).get('render_generation', -1))
+            state = self.session.frame_state(self.slot, timeout=min(.5, timeout))
+            self._frame_floor = int(state.get('render_generation', -1))
+            self._seek_floor = state.get('seek_generation')
         return self.session.request('command', slot=self.slot, command=list(command), timeout=timeout)
 
     def set_grades(self, grades):
@@ -213,11 +224,14 @@ class TextureController:
         previous = self.session.frame_state(self.slot)
         generation = int(previous.get('file_generation', -1))
         self._frame_floor = int(previous.get('render_generation', -1))
+        self._seek_floor = None
         self.command(['loadfile', str(path), 'replace'])
         self.command(['set_property', 'pause', True])
         deadline = time.monotonic()+timeout
         expected = os.path.normcase(str(Path(path).resolve()))
         while time.monotonic() < deadline:
+            if self.operation_cancel_event is not None and self.operation_cancel_event.is_set():
+                raise RuntimeError('GPU 预览素材加载已取消。')
             state = self.session.frame_state(self.slot, timeout=min(.5, max(.01, deadline-time.monotonic())))
             actual = state.get('path')
             loaded = actual and os.path.normcase(str(Path(actual).resolve())) == expected
@@ -225,7 +239,8 @@ class TextureController:
                 hwdec = str(state.get('hwdec') or '').lower()
                 if hwdec and hwdec not in ('no', 'none') and 'copy' not in hwdec:
                     return {'hwdec': hwdec, 'renderer': 'native-d3d11-texture'}
-            time.sleep(.01)
+            if self.operation_cancel_event is not None: self.operation_cancel_event.wait(.01)
+            else: time.sleep(.01)
         raise RuntimeError('GPU 纹理未完成新素材硬件解码；未使用 CPU 回退。')
 
     def wait_for_frame(self, target, *, timeout=4., cancel_event=None):
@@ -234,9 +249,22 @@ class TextureController:
             if cancel_event is not None and cancel_event.is_set(): raise RuntimeError('正在关闭 GPU 预览。')
             state = self.session.frame_state(self.slot, timeout=min(.4, max(.01, deadline-time.monotonic())))
             position = state.get('time_pos')
+            fps = state.get('container-fps') or state.get('estimated-vf-fps') or 30.
+            try: fps = float(fps)
+            except (TypeError, ValueError): fps = 30.
+            if not math.isfinite(fps) or fps <= 0: fps = 30.
+            tolerance = .5/fps+.002
+            # A command acknowledgement or redraw is not evidence that the
+            # newly requested frame finished decoding and reached its texture.
+            seek_complete = (self._seek_floor is None or
+                (int(state.get('seek_generation', -1)) > self._seek_floor and
+                 int(state.get('restart_generation', -1)) >= int(state.get('seek_generation', 0))))
+            frame_floor = max(self._frame_floor, int(state.get('seek_render_floor', -1)))
+            rendered = int(state.get('render_generation', -1))
+            presented = int(state.get('presented_render_generation', rendered))
             if (state.get('seeking') is False and isinstance(position, (int, float))
-                    and abs(position-target) <= .15 and state.get('width', 0) > 0 and state.get('height', 0) > 0
-                    and int(state.get('render_generation', -1)) > self._frame_floor):
+                    and abs(position-target) <= tolerance and state.get('width', 0) > 0 and state.get('height', 0) > 0
+                    and seek_complete and rendered > frame_floor and presented >= rendered):
                 return float(position)
             if cancel_event is not None: cancel_event.wait(.008)
             else: time.sleep(.008)

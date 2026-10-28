@@ -12,7 +12,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
+from effects_core import (
+    EffectSettings,
+    build_effect_filter_graph,
+    build_effect_filters,
+    overlay_active,
+    validate_effects,
+)
 from gpu_profiles import GpuProfile, classify_gpu
+from video_stack import stream_has_alpha
 
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -36,6 +44,8 @@ class MediaInfo:
     timecode: str | None = None
     sample_aspect_ratio: str = "1:1"
     color_range: str | None = None
+    has_video: bool = True
+    has_alpha: bool = False
 
 
 @dataclass(slots=True)
@@ -76,6 +86,8 @@ class ExportSettings:
     video_bitrate: str = ""
     maxrate: str = ""
     extra_args: list[str] = field(default_factory=list)
+    profile: str = ""
+    pixel_format: str = ""
     audio_sample_rate: int | None = 48000
     parallel_workers: int = 1
     auto_parallel: bool = False
@@ -85,19 +97,24 @@ class ExportCancelled(RuntimeError):
     pass
 
 
-def _run_text(args: Sequence[str], timeout: float = 15) -> tuple[int, str]:
+def _run_text(args: Sequence[str], timeout: float = 15, *, structured: bool = False) -> tuple[int, str]:
     try:
         result = subprocess.run(
             list(args),
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE if structured else subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
         )
-        return result.returncode, result.stdout
+        # ffprobe can successfully return JSON while a decoder prints a
+        # warning. Keep that diagnostic channel out of the JSON document.
+        output = result.stdout
+        if structured and result.returncode and result.stderr:
+            output += "\n" + result.stderr
+        return result.returncode, output
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, str(exc)
 
@@ -140,36 +157,48 @@ def _infer_depth(stream: dict) -> int:
     return 8
 
 
-def probe_media(ffprobe: str, path: str) -> MediaInfo:
-    args = [
+def _media_probe_command(ffprobe: str, path: str) -> list[str]:
+    return [
         ffprobe,
         "-v", "error",
         "-show_entries",
         "format=duration:format_tags=timecode:"
         "stream=index,codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,pix_fmt,"
         "bits_per_raw_sample,color_primaries,color_transfer,color_space,color_range,"
-        "sample_aspect_ratio,duration:stream_tags=timecode",
+        "sample_aspect_ratio,duration:stream_tags=timecode,alpha_mode:stream_disposition=attached_pic",
         "-of", "json",
         path,
     ]
-    code, output = _run_text(args, timeout=30)
+
+
+def probe_media(ffprobe: str, path: str, *, allow_audio_only: bool = False) -> MediaInfo:
+    args = _media_probe_command(ffprobe, path)
+    code, output = _run_text(args, timeout=30, structured=True)
     if code:
         raise RuntimeError(f"ffprobe could not read the input:\n{output.strip()}")
     try:
         payload = json.loads(output)
     except json.JSONDecodeError as exc:
         raise RuntimeError("ffprobe returned invalid JSON") from exc
+    return _media_info_from_payload(path, payload, allow_audio_only=allow_audio_only)
 
+
+def _media_info_from_payload(path: str, payload: dict, *, allow_audio_only: bool = False) -> MediaInfo:
+    """Shared interpretation for regular and explicitly cancellable probes."""
     streams = payload.get("streams", [])
-    video = next((item for item in streams if item.get("codec_type") == "video"), None)
-    if not video:
-        raise RuntimeError("No video stream was found in this file")
+    video = next((item for item in streams if item.get("codec_type") == "video"
+                  and not (item.get("disposition") or {}).get("attached_pic")), None)
     audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
+    if video is None and (not allow_audio_only or audio is None):
+        raise RuntimeError("No video stream was found in this file")
+    has_video = video is not None
+    video = video or {}
     format_info = payload.get("format", {})
     # Camera audio can extend beyond the last video frame. Timeline cuts and
     # camera-off gaps must be based on the picture duration, not that audio tail.
     try:
-        duration = float(video.get("duration") or format_info.get("duration") or 0)
+        duration = float(video.get("duration") or ((audio or {}).get("duration") if not has_video else None)
+                         or format_info.get("duration") or 0)
     except (TypeError, ValueError):
         duration = float(format_info.get("duration") or 0)
     if not math.isfinite(duration) or duration <= 0:
@@ -193,7 +222,7 @@ def probe_media(ffprobe: str, path: str) -> MediaInfo:
         width=int(video.get("width") or 0),
         height=int(video.get("height") or 0),
         fps=fps,
-        video_codec=str(video.get("codec_name") or "unknown"),
+        video_codec=str(video.get("codec_name") or ("unknown" if has_video else "none")),
         pixel_format=str(video.get("pix_fmt") or "unknown"),
         bit_depth=_infer_depth(video),
         audio_codec=str(audio.get("codec_name") if audio else "none"),
@@ -204,6 +233,8 @@ def probe_media(ffprobe: str, path: str) -> MediaInfo:
         timecode=str(timecode) if timecode else None,
         sample_aspect_ratio=str(video.get("sample_aspect_ratio") or "1:1"),
         color_range=video.get("color_range"),
+        has_video=has_video,
+        has_alpha=has_video and stream_has_alpha(video),
     )
 
 
@@ -275,7 +306,96 @@ def _target_depth(settings: ExportSettings, media: MediaInfo) -> int:
     return 10 if media.bit_depth > 8 else 8
 
 
-def build_video_filter(settings: ExportSettings, media: MediaInfo, caps: Capabilities) -> list[str]:
+SOFTWARE_PROXY_ENCODERS = frozenset({"dnxhd", "prores_ks"})
+
+
+def _even(value: float) -> int:
+    return max(2, int(round(value / 2.0)) * 2)
+
+
+def _square_pixel_width(media: MediaInfo, height: int) -> int:
+    sar = 1.0
+    match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*[:/]\s*([0-9]+(?:\.[0-9]+)?)\s*", media.sample_aspect_ratio or "")
+    if match:
+        numerator, denominator = float(match.group(1)), float(match.group(2))
+        if numerator > 0 and denominator > 0:
+            sar = numerator / denominator
+    return _even(media.width * sar * height / media.height)
+
+
+def _software_pixel_format(settings: ExportSettings) -> str:
+    if settings.pixel_format:
+        return settings.pixel_format
+    if settings.codec == "prores_ks" or settings.profile == "dnxhr_hqx":
+        return "yuv422p10le"
+    return "yuv422p"
+
+
+def _software_frame_size(
+    settings: ExportSettings,
+    media: MediaInfo,
+    rotation: int = 0,
+) -> tuple[int, int]:
+    height = _even(_resolution_height(settings.resolution) or media.height or 1080)
+    if media.width > 0 and media.height > 0:
+        width = _square_pixel_width(media, height)
+    else:
+        width = _even(1920 * height / 1080)
+    if rotation in {90, 270}:
+        # The fixed software-proxy scale runs after the effect chain.  Without
+        # swapping the target dimensions, a 1920x1080 proxy scale would flatten
+        # a rotated 1080x1920 frame back into landscape and visually cancel the
+        # rotation.  Swap the target frame so the output keeps the rotated
+        # orientation and square pixels.
+        width, height = height, width
+    if settings.codec == "dnxhd" and width < 256:
+        width = 256
+        if media.width > 0 and media.height > 0:
+            if rotation in {90, 270}:
+                height = max(120, _even(width * media.width / media.height))
+            else:
+                height = max(120, _even(width * media.height / media.width))
+    return width, height
+
+
+def build_video_filter(
+    settings: ExportSettings,
+    media: MediaInfo,
+    caps: Capabilities,
+    *,
+    effects: EffectSettings | None = None,
+    effect_duration: float | None = None,
+) -> list[str]:
+    """Build the single video filter graph used by one export.
+
+    ``effects`` is opt-in.  Passing ``None`` (the default for every existing
+    export workflow) produces exactly the same command as before, so ordinary
+    export, trim, join and proxy output cannot be changed implicitly.
+    """
+
+    effect_filters: list[str] = []
+    effect_rotation = 0
+    validated_effects: EffectSettings | None = None
+    resolved_duration: float | None = None
+    if effects is not None:
+        resolved_duration = effect_duration if effect_duration is not None else media.duration
+        validated_effects = validate_effects(effects, duration=resolved_duration)
+        effect_rotation = validated_effects.rotation
+        if overlay_active(validated_effects) and not os.path.isfile(validated_effects.overlay_path):
+            raise ValueError(f"叠加特效素材文件不存在：{validated_effects.overlay}")
+        effect_filters = build_effect_filters(validated_effects, duration=resolved_duration)
+
+    if settings.codec in SOFTWARE_PROXY_ENCODERS:
+        width, height = _software_frame_size(settings, media, rotation=effect_rotation)
+        scale = f"scale={width}:{height}:flags=lanczos"
+        if media.color_range == "pc":
+            scale += ":in_range=pc:out_range=tv"
+        suffix = [scale, "setsar=1", f"format={_software_pixel_format(settings)}"]
+        graph = build_effect_filter_graph(
+            validated_effects, duration=resolved_duration, suffix=suffix,
+        ) if validated_effects is not None else ""
+        return ["-vf", graph] if graph else ["-vf", ",".join(suffix)]
+
     height = _resolution_height(settings.resolution)
     depth = _target_depth(settings, media)
     gpu_format = "p010le" if depth == 10 else "nv12"
@@ -283,30 +403,108 @@ def build_video_filter(settings: ExportSettings, media: MediaInfo, caps: Capabil
     format_needed = depth != media.bit_depth
 
     if settings.decode_mode == "cuda":
-        # The common 8K 10-bit HEVC -> 8K 10-bit HEVC path can pass decoded
-        # CUDA frames directly into NVENC. Avoiding a no-op scale/filter saves
-        # a full-frame allocation and copy for every 8K frame.
-        if not resize_needed and not format_needed:
-            return []
-        if caps.scale_cuda:
-            dimensions = f"-2:{height}:" if resize_needed else ""
-            return ["-vf", f"scale_cuda={dimensions}format={gpu_format}:passthrough=0"]
-        cpu_format = "p010le" if depth == 10 else "nv12"
-        filters = ["hwdownload", f"format={cpu_format}"]
-        if resize_needed:
-            filters += [f"scale=-2:{height}", f"format={cpu_format}"]
-        filters.append("hwupload_cuda")
-        return ["-vf", ",".join(filters)]
+        if not effect_filters and not overlay_active(validated_effects):
+            # The common 8K 10-bit HEVC -> 8K 10-bit HEVC path can pass decoded
+            # CUDA frames directly into NVENC. Avoiding a no-op scale/filter saves
+            # a full-frame allocation and copy for every 8K frame.
+            if not resize_needed and not format_needed:
+                return []
+            if caps.scale_cuda:
+                dimensions = f"-2:{height}:" if resize_needed else ""
+                return ["-vf", f"scale_cuda={dimensions}format={gpu_format}:passthrough=0"]
+            # hwdownload must match the decoder surface, not the requested
+            # output depth. A P010 -> NV12 conversion is a separate CPU step
+            # when this FFmpeg build does not contain scale_cuda.
+            source_format = "p016le" if media.bit_depth > 10 else "p010le" if media.bit_depth > 8 else "nv12"
+            filters = ["hwdownload", f"format={source_format}"]
+            if resize_needed:
+                filters.append(f"scale=-2:{height}")
+            if resize_needed or source_format != gpu_format:
+                filters.append(f"format={gpu_format}")
+            filters.append("hwupload_cuda")
+            return ["-vf", ",".join(filters)]
 
-    filters: list[str] = []
-    if resize_needed:
-        filters.append(f"scale=-2:{height}")
-    filters.append(f"format={gpu_format}")
-    return ["-vf", ",".join(filters)]
+        # Effects such as eq/unsharp/vignette/fade run in libavfilter. A CUDA
+        # frame therefore has to be downloaded once, processed on the CPU and
+        # uploaded again for NVENC. The UI says so explicitly instead of
+        # pretending the effect stack is GPU realtime.  hwdownload must target
+        # the decoded frame's own layout (source depth), while the final
+        # format follows the requested output depth.
+        if media.bit_depth > 10:
+            source_gpu_format = "p016le"
+        elif media.bit_depth > 8:
+            source_gpu_format = "p010le"
+        else:
+            source_gpu_format = "nv12"
+        prefix = ["hwdownload", f"format={source_gpu_format}"]
+        suffix = ([f"scale=-2:{height}"] if resize_needed else [])
+        suffix += [f"format={gpu_format}", "hwupload_cuda"]
+        if validated_effects is not None:
+            graph = build_effect_filter_graph(
+                validated_effects, duration=resolved_duration,
+                prefix=prefix, suffix=suffix,
+            )
+            if graph:
+                return ["-vf", graph]
+        return ["-vf", ",".join(prefix + suffix)]
+
+    suffix = ([f"scale=-2:{height}"] if resize_needed else []) + [f"format={gpu_format}"]
+    if validated_effects is not None:
+        graph = build_effect_filter_graph(
+            validated_effects, duration=resolved_duration, suffix=suffix,
+        )
+        if graph:
+            return ["-vf", graph]
+    return ["-vf", ",".join(suffix)]
 
 
 def _supported_option(help_text: str, option: str) -> bool:
     return re.search(rf"(?m)^\s*-{re.escape(option)}\s", help_text) is not None
+
+
+# CUDA hwframes only download cleanly from these common camera layouts.  Other
+# 4:2:2/4:4:4 formats are decoded on the CPU when effects are required; the
+# encoder still uses the unified NVENC settings.
+CUDA_EFFECT_DOWNLOAD_FORMATS = frozenset({
+    "nv12", "yuv420p", "yuvj420p", "p010le", "yuv420p10le", "p016le",
+})
+
+
+def cuda_effects_download_supported(media: MediaInfo) -> bool:
+    return str(media.pixel_format or "").lower() in CUDA_EFFECT_DOWNLOAD_FORMATS
+
+
+def _compatible_av1_level(settings: ExportSettings, media: MediaInfo) -> str | None:
+    """Avoid reserved auto levels emitted by recent NVENC drivers.
+
+    AV1 Annex A defines levels through 6.3; 7.x remains unspecified and is
+    rejected by the bundled libaom decoder. Use high-tier limits, with ample
+    bitrate headroom for CQ jobs, and leave unsupported sizes to the encoder.
+    https://aomediacodec.github.io/av1-spec/#levels
+    """
+    if media.width <= 0 or media.height <= 0 or not math.isfinite(media.fps) or media.fps <= 0:
+        return None
+    height = _resolution_height(settings.resolution) or media.height
+    width = _even(media.width * height / media.height)
+    bitrate = 160_000_000.0 if not settings.video_bitrate and not settings.maxrate else 0.0
+    for value in (settings.video_bitrate, settings.maxrate):
+        if not value:
+            continue
+        match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kKmMgG]?)\s*", value)
+        if not match:
+            return None
+        bitrate = max(bitrate, float(match[1]) * {"":1, "k":1e3, "m":1e6, "g":1e9}[match[2].lower()])
+    for level, max_pixels, max_width, max_height, rate, mbps in (
+        ("5.1", 8912896, 8192, 4352, 534773760, 160),
+        ("5.2", 8912896, 8192, 4352, 1069547520, 240),
+        ("6.0", 35651584, 16384, 8704, 1069547520, 240),
+        ("6.1", 35651584, 16384, 8704, 2139095040, 480),
+        ("6.2", 35651584, 16384, 8704, 4278190080, 800),
+    ):
+        if (width <= max_width and height <= max_height and width * height <= max_pixels
+                and width * height * media.fps <= rate and bitrate <= mbps * 1e6):
+            return level
+    return None
 
 
 def build_video_args(
@@ -314,9 +512,22 @@ def build_video_args(
     media: MediaInfo,
     caps: Capabilities,
 ) -> list[str]:
+    if settings.codec in SOFTWARE_PROXY_ENCODERS:
+        args = ["-c:v", settings.codec]
+        if settings.profile:
+            args += ["-profile:v", settings.profile]
+        args += ["-fps_mode", "passthrough"]
+        args += list(settings.extra_args)
+        return args
+
     help_text = caps.raw_encoder_help.get(settings.codec, "")
     throughput_mode = settings.preset in {"p1", "p2"}
     args = ["-c:v", settings.codec, "-preset", settings.preset]
+    if (settings.codec == "av1_nvenc" and _supported_option(help_text, "level")
+            and not any(value in {"-level", "-level:v", "-tier", "-tier:v"} for value in settings.extra_args)):
+        level = _compatible_av1_level(settings, media)
+        if level is not None:
+            args += ["-level:v", level, "-tier", "1"]
     if _supported_option(help_text, "tune") or not help_text:
         args += ["-tune", settings.tune]
     if settings.video_bitrate.strip():
@@ -338,7 +549,10 @@ def build_video_args(
     args += ["-g", str(settings.gop), "-bf", str(bframes)]
 
     depth = _target_depth(settings, media)
-    if settings.codec in {"hevc_nvenc", "av1_nvenc"} and depth == 10:
+    if settings.codec == "hevc_nvenc" and depth == 10:
+        # main10 is an HEVC profile; AV1 has main/high only, so passing
+        # main10 to av1_nvenc makes FFmpeg reject the job.  The 10-bit pixel
+        # format is already selected in build_video_filter.
         args += ["-profile:v", "main10"]
     split_encode = settings.split_encode
     if split_encode.isdigit() and caps.gpu_profile.in_supported_range:
@@ -369,6 +583,7 @@ def build_encode_command(
     start: float | None = None,
     duration: float | None = None,
     video_only: bool = False,
+    effects: EffectSettings | None = None,
 ) -> list[str]:
     command = [
         ffmpeg, "-hide_banner", "-y", "-loglevel", "warning",
@@ -376,7 +591,7 @@ def build_encode_command(
     ]
     if start is not None:
         command += ["-ss", f"{start:.6f}"]
-    if settings.decode_mode == "cuda":
+    if settings.decode_mode == "cuda" and settings.codec not in SOFTWARE_PROXY_ENCODERS:
         command += [
             "-hwaccel", "cuda",
             "-hwaccel_device", str(settings.gpu_index),
@@ -388,7 +603,16 @@ def build_encode_command(
     command += ["-map", "0:v:0"]
     if not video_only:
         command += ["-map", "0:a?"]
-    command += build_video_filter(settings, media, caps)
+    effect_duration = duration
+    if effect_duration is None:
+        effect_duration = float(media.duration or 0.0)
+        if start is not None:
+            effect_duration = max(0.0, effect_duration - float(start))
+    command += build_video_filter(
+        settings, media, caps,
+        effects=effects,
+        effect_duration=effect_duration,
+    )
     command += build_video_args(settings, media, caps)
 
     if video_only:
@@ -397,8 +621,13 @@ def build_encode_command(
         command += ["-c:a", "copy"]
     elif settings.audio == "none":
         command += ["-an"]
+    elif settings.audio in {"pcm", "pcm24", "pcm_s24le"}:
+        command += ["-c:a", "pcm_s24le"]
     else:
         command += ["-c:a", "aac", "-b:a", settings.audio_bitrate]
+
+    if not video_only and settings.audio not in {"copy", "none"} and settings.audio_sample_rate:
+        command += ["-ar", str(settings.audio_sample_rate)]
 
     suffix = Path(output_path).suffix.lower()
     if suffix in {".mp4", ".mov", ".m4v"}:
@@ -428,8 +657,12 @@ def build_mux_command(
         command += ["-c:a", "copy"]
     elif settings.audio == "none":
         command += ["-an"]
+    elif settings.audio in {"pcm", "pcm24", "pcm_s24le"}:
+        command += ["-c:a", "pcm_s24le"]
     else:
         command += ["-c:a", "aac", "-b:a", settings.audio_bitrate]
+    if settings.audio not in {"copy", "none"} and settings.audio_sample_rate:
+        command += ["-ar", str(settings.audio_sample_rate)]
     if Path(output_path).suffix.lower() in {".mp4", ".mov", ".m4v"}:
         command += ["-movflags", "+faststart"]
     command += ["-shortest", output_path]

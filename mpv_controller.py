@@ -36,6 +36,12 @@ MPV_GPU_PLAYBACK_OPTIONS = [
     "--gpu-context=d3d11",
     "--d3d11-adapter=NVIDIA",
     "--profile=fast",
+    # Bound compressed demux packets per viewer. Decoder surfaces, GPU
+    # textures and the rest of each process have separate memory costs.
+    "--demuxer-max-bytes=32MiB",
+    "--demuxer-max-back-bytes=8MiB",
+    "--demuxer-readahead-secs=2",
+    "--cache-on-disk=no",
 ]
 
 
@@ -51,6 +57,7 @@ class MpvController:
         self._read_buffer = bytearray()
         self._request_id = 0
         self._event_counts = {}
+        self.operation_cancel_event = None
         # The aligned-preview endpoint is enforced by the application poller.
         # MPV exposes `end` as a file-local option, but some Windows builds do
         # not expose it as a writable IPC property and return
@@ -76,6 +83,7 @@ class MpvController:
             "--terminal=no",
             "--osc=no",
             "--input-default-bindings=no",
+            "--input-vo-keyboard=no",
             "--input-cursor=no",
             f"--wid={self.window_id}",
             f"--input-ipc-server={self.pipe_name}",
@@ -110,9 +118,15 @@ class MpvController:
             except OSError:
                 pass
 
+    def _check_operation_cancelled(self):
+        event = getattr(self, 'operation_cancel_event', None)
+        if event is not None and event.is_set():
+            raise RuntimeError('预览操作已被更新的定位请求取消。')
+
     def _connect_pipe(self, deadline: float) -> BinaryIO:
         last_error: OSError | None = None
         while time.monotonic() < deadline:
+            self._check_operation_cancelled()
             if not self.process or self.process.poll() is not None:
                 raise RuntimeError("MPV 尚未启动。")
             try:
@@ -144,6 +158,7 @@ class MpvController:
 
     def _read_line(self, deadline):
         while time.monotonic()<deadline:
+            self._check_operation_cancelled()
             if b'\n' in self._read_buffer:
                 line,_,remaining=self._read_buffer.partition(b'\n')
                 self._read_buffer=bytearray(remaining)
@@ -198,6 +213,7 @@ class MpvController:
         raise RuntimeError("MPV 命令响应超时。")
 
     def load(self, path: str, timeout: float = 8.0) -> dict[str, str]:
+        self._check_operation_cancelled()
         self.preview_end_seconds = None
         generation=self._event_counts.get('file-loaded',0)
         self.command(["loadfile", path, "replace"])
@@ -239,6 +255,7 @@ class MpvController:
         last_error: Exception | None = None
         cpu_fallback: Exception | None = None
         while time.monotonic() < deadline:
+            self._check_operation_cancelled()
             try:
                 fresh_file = False
                 if expected_path is not None:

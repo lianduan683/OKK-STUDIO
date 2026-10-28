@@ -58,6 +58,8 @@ def compile_live_transitions(project, *, use_proxies=True):
     result = []
     previous_end = -1
     for effect in sorted(project.transitions, key=lambda item: item.time):
+        if getattr(effect, 'mask_path', ''):
+            raise ValueError('资源遮罩转场使用后台准备的精确预览。')
         count = max(1, _frame(effect.duration, fps))
         cut = _frame(effect.time, fps)
         first, last = cut-count//2, cut-count//2+count
@@ -110,6 +112,8 @@ def missing_gpu_features(project, capabilities):
     if not capabilities.get('grade_uniforms') and any(grade and grade.enabled and not grade_is_identity(grade) for grade in grades):
         missing.append('调色')
     supported = set(capabilities.get('transitions', ()))
+    if any(getattr(effect, 'mask_path', '') for effect in project.transitions):
+        missing.append('资源遮罩转场')
     missing.extend(effect.kind for effect in project.transitions if effect.kind not in supported)
     return tuple(dict.fromkeys(missing))
 
@@ -142,7 +146,9 @@ class GpuLivePlayerMixin:
             self._gpu_pause_states[key] = bool(paused)
 
     def _gpu_stop(self):
-        session, self._gpu_session = self._gpu_session, None
+        # Keep the owner reachable until native shutdown has succeeded.  A
+        # failover replaces texture slots, so those slots cannot own retries.
+        session = self._gpu_session
         self._gpu_context = None
         self._gpu_plans = ()
         self._gpu_live_enabled = False
@@ -150,8 +156,13 @@ class GpuLivePlayerMixin:
         if session is not None:
             for slot in (self._program, self._program_standby):
                 if slot is not None and getattr(slot.controller, 'release_only', False):
-                    slot.controller.stop()
+                    try:slot.controller.stop()
+                    except Exception:
+                        # Closing the complete session below may recover a
+                        # failed per-texture release; always attempt both.
+                        pass
             session.close()
+            self._gpu_session = None
 
     def _gpu_failover(self, camera, error):
         """Keep the master clock running, and stop retrying a failed backend."""
@@ -238,6 +249,7 @@ class GpuLivePlayerMixin:
         return LiveSide(camera, clip.id if clip is not None else '', path, tuple(key), position-native_time, position)
 
     def _gpu_ensure_side(self, slot, side, position, *, force=False, grades=None):
+        if self._gpu_navigation_pending(): return False
         if slot.failed_key == side.asset_key: return False
         try:
             new = slot.key != side.asset_key
@@ -247,14 +259,15 @@ class GpuLivePlayerMixin:
                 self._gpu_pause(slot, True, force=True)
                 self._set_picture_speed(slot, 1.)
                 controller.command(['set_property', 'mute', True])
-                if new: controller.load(side.path)
-                position = self._clock() if self._playing else self._position
+                if new: self._load_picture(controller, side.path)
+                position = self._clock() if self._playing and not force else self._position
                 target = max(0., side.native_time(position))
                 # A normal cut may already have a decoded staging frame.
                 # Preserve that frame while still verifying render readiness.
                 ready = self._prepare_picture_frame(slot, target, force=force, newly_loaded=new)
+                if self._gpu_navigation_pending(): return False
                 slot.key, slot.failed_key, slot.active = side.asset_key, None, True
-                latest = self._clock() if self._playing else self._position
+                latest = self._clock() if self._playing and not force else self._position
                 if self._playing and side.native_time(latest) >= 0:
                     self._catch_up_picture(slot, side.native_time(latest)-ready)
                 position = latest
@@ -264,11 +277,17 @@ class GpuLivePlayerMixin:
             self._gpu_pause(slot, not (self._playing and side.native_time(position) >= 0))
             return True
         except Exception as error:
+            if self._gpu_navigation_pending(): return False
             slot.failed_key = side.asset_key
             self._gpu_failover(side.camera, error)
             return False
 
+    def _gpu_navigation_pending(self):
+        pending = getattr(self, '_navigation_pending', None)
+        return self._closing.is_set() or (callable(pending) and pending())
+
     def _gpu_compose(self, outgoing, incoming=None, *, plan=None, position=None):
+        if self._gpu_navigation_pending(): return
         position = self._position if position is None else position
         ready = plan is not None and (not self._playing or plan.incoming.native_time(position) >= 0)
         active = bool(ready)
@@ -321,13 +340,17 @@ class GpuLivePlayerMixin:
         target = current if current.key in (None, side.asset_key) else self._program_standby
         grades = () if self._is_baked_key(side.asset_key) else self._program_grade_chain(camera, position)
         if not self._gpu_ensure_side(target, side, position, force=force, grades=grades): return
+        if self._gpu_navigation_pending(): return
         self._gpu_compose(target, position=position)
         if target is not current:
             self._program, self._program_standby = target, current
             self._gpu_pause(current, True)
 
     def _gpu_sync_program(self, *, force=False, drift=False):
-        position = self._clock() if self._playing else self._position
+        if self._gpu_navigation_pending(): return
+        # The audio seek acknowledgement precedes the decoder clock update.
+        # A forced navigation must keep its requested time for both textures.
+        position = self._clock() if self._playing and not force else self._position
         rendered = self._render_preview
         overrides = (self._comparison_enabled or self._audition is not None or
                      bool(rendered and rendered[1] <= position < rendered[2]))
@@ -361,10 +384,10 @@ class GpuLivePlayerMixin:
         grades_a = side_grades(self._project, plan.outgoing, self._grade_draft) if in_window else self._program_grade_chain(plan.outgoing.camera, position)
         ready_a = self._gpu_ensure_side(a, plan.outgoing, position,
                                       force=force and a is not single_synced, grades=grades_a)
-        if not ready_a: return
+        if not ready_a or self._gpu_navigation_pending(): return
         ready_b = self._gpu_ensure_side(b, plan.incoming, position, force=force)
-        if not ready_b: return
-        position = self._clock() if self._playing else self._position
+        if not ready_b or self._gpu_navigation_pending(): return
+        position = self._clock() if self._playing and not force else self._position
         if position >= plan.end:
             self._gpu_finish_context(position)
             return

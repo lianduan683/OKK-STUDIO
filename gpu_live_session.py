@@ -9,6 +9,7 @@ import ctypes as C
 import hashlib
 import json
 import math
+import sys
 from pathlib import Path
 import threading
 import time
@@ -21,7 +22,7 @@ KINDS=('fade','dissolve','wipeleft','wiperight','slideleft','slideright','circle
 
 def runtime_directory(preferred=None):
     candidates=[Path(preferred)] if preferred else []
-    root=Path(__file__).resolve().parent
+    root=Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else Path(__file__).resolve().parent
     candidates.extend((root/'bin/gpu_live',root/'native_runtime/gpu_live'))
     for path in candidates:
         if all((path/name).is_file() for name in ('libmpv-2.dll','vertex.cso','composite.cso','shader_layout.json')):
@@ -40,6 +41,8 @@ class GpuLiveSession:
         self._mix={'front_slot':'a','other_slot':'b','kind':'fade','progress':0.,'active':False,
                    'rate':0.,'received':time.perf_counter()}
         self._present_count=0;self._readbacks=0;self._adapter='';self._output_hwnd=0;self._render_debug=[{},{}]
+        self._presented_render_generations={'a':0,'b':0}
+        self._visible=True
         layout=json.loads((self.runtime/'shader_layout.json').read_text(encoding='utf-8'))
         names=tuple(layout['side_uniforms'])
         if len(names)!=612:raise RuntimeError('GPU 调色布局数量不匹配。')
@@ -79,6 +82,7 @@ class GpuLiveSession:
         if op=='compose':
             return self.compose(**{key:value for key,value in payload.items() if key not in ('op','request_id')})
         if op=='resize':return self.resize(payload['width'],payload['height'])
+        if op=='set_visible':return self.set_visible(payload['visible'])
         if op=='screenshot':return self.screenshot(payload['path'],timeout=timeout)
         if op=='quit':return self.close()
         raise ValueError('Unsupported GPU operation: '+str(op))
@@ -98,6 +102,7 @@ class GpuLiveSession:
         value.update(time_pos=value.get('time-pos'),hwdec=value.get('hwdec-current'),
                      width=video.get('w',0),height=video.get('h',0),
                      output_hwnd=self._output_hwnd,present_generation=self._present_count,
+                     presented_render_generation=self._presented_render_generations[slot],
                      adapter=self._adapter,render_debug=dict(self._render_debug[0 if slot=='a' else 1]))
         return value
 
@@ -132,6 +137,13 @@ class GpuLiveSession:
         with self._lock:self.width,self.height=width,height
         self._wake.set()
 
+    def set_visible(self,visible):
+        """Suspend presentation without replacing either decoder or output HWND."""
+        if type(visible) is not bool:raise ValueError('GPU visibility must be a boolean')
+        self._healthy()
+        with self._lock:self._visible=visible
+        self._wake.set()
+
     def screenshot(self,path,timeout=3.):
         if not self.diagnostics:raise RuntimeError('GPU pixel readback is disabled during normal playback')
         future=Future()
@@ -146,13 +158,21 @@ class GpuLiveSession:
             self._adapter=gfx.adapter_name;self._output_hwnd=int(gfx.window or 0)
             for core in self._cores.values():contexts.append(core.create_context(gfx.device.value.value,self._wake))
             self._contexts=contexts
-            self._ready.set();pending=[False,False]
+            self._ready.set();pending=[False,False];visible_applied=True
             while not self._stop.is_set():
                 began=time.perf_counter();gfx.pump_messages()
                 with self._lock:
                     requested=(self.width,self.height);mix=dict(self._mix)
                     grades={key:list(value) for key,value in self._grades.items()}
-                    captures=self._capture;self._capture=[]
+                    captures=self._capture;self._capture=[];visible=self._visible
+                if visible_applied!=visible:
+                    gfx.set_visible(visible);visible_applied=visible
+                if not visible and not captures:
+                    # Stack preview owns the displayed picture. Keep the
+                    # decoder/context/HWND alive, but do no resize, texture
+                    # draw or 60-Hz Present work until it is shown again.
+                    self._wake.wait(.1);self._wake.clear()
+                    continue
                 size=gfx.client_size() if self.parent else requested
                 resized=gfx.resize(*size)
                 for index,context in enumerate(contexts):
@@ -183,7 +203,10 @@ class GpuLiveSession:
                         if not future.done():future.set_exception(error)
                 gfx.present();self._present_count+=1
                 for index,context in enumerate(contexts):
-                    if self._cores[('a','b')[index]].frame_state().get('render_generation',0):context.report_swap()
+                    slot=('a','b')[index]
+                    generation=self._cores[slot].frame_state().get('render_generation',0)
+                    self._presented_render_generations[slot]=generation
+                    if generation:context.report_swap()
                 self._wake.wait(max(0.,1/60-(time.perf_counter()-began)));self._wake.clear()
         except Exception as error:
             self._error=str(error);self._ready.set()
@@ -199,7 +222,7 @@ class GpuLiveSession:
             self._gfx=None
 
     def close(self):
-        if self._closed:return
+        if self._closed and not self._cores:return
         self._closed=True
         if self._thread is not None and self._thread.is_alive():
             requests=[]
@@ -212,5 +235,13 @@ class GpuLiveSession:
                 except Exception:pass
             self._stop.set();self._wake.set();self._thread.join(8)
             if self._thread.is_alive():raise TimeoutError('GPU render thread did not close')
-        for core in self._cores.values():core.close()
-        self._cores={}
+        errors=[]
+        for slot,core in list(self._cores.items()):
+            try:core.close()
+            except Exception as error:errors.append(error)
+            else:self._cores.pop(slot,None)
+        with self._lock:captures=self._capture;self._capture=[]
+        for _,future in captures:
+            if not future.done():future.set_exception(RuntimeError('GPU render session is closed'))
+        if not self._cores:self._library=None
+        if errors:raise errors[0]

@@ -220,7 +220,8 @@ def range_from_dict(value, absolute=None):
 
 def find_gyroflow(preferred='', app_dir=None):
     candidates = [preferred]
-    base = Path(app_dir) if app_dir else Path(__file__).resolve().parent
+    import sys
+    base = Path(app_dir) if app_dir else (Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent)
     candidates += [str(base/'bin'/'gyroflow'/'Gyroflow.exe'), str(base/'bin'/'Gyroflow.exe'),
                    str(base/'Gyroflow.exe')]
     found = shutil.which('Gyroflow') or shutil.which('Gyroflow.exe')

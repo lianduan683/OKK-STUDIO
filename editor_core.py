@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import cmath
+import os
 import re
 import subprocess
 import sys
@@ -12,6 +13,8 @@ from itertools import islice
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+from effects_core import EffectSettings, build_effect_filter_graph, overlay_active, validate_effects
+
 from exporter_core import (
     CREATE_NO_WINDOW,
     Capabilities,
@@ -19,6 +22,7 @@ from exporter_core import (
     MediaInfo,
     _resolution_height,
     _target_depth,
+    build_encode_command,
     build_video_args,
     build_video_filter,
 )
@@ -900,6 +904,7 @@ def _build_join_video_inputs(
     media: Sequence[MediaInfo],
     settings: ExportSettings,
     caps: Capabilities,
+    overlays: Mapping[str, EffectSettings] | None = None,
 ) -> tuple[list[str], list[str], int, MediaInfo, float]:
     """Create seeked video inputs and one frame-exact concat filter graph."""
     if not spans or not media:
@@ -918,7 +923,9 @@ def _build_join_video_inputs(
     pixel_format = "p010le" if _target_depth(settings, reference) == 10 else "nv12"
     sar = reference.sample_aspect_ratio
     sar = sar.replace(":", "/") if re.fullmatch(r"[1-9]\d*:[1-9]\d*", sar) else "1"
-    cuda_frames = join_uses_cuda_frames(settings, reference, caps)
+    has_overlays = any(overlay_active((overlays or {}).get(paths[span.source_index]))
+                       for span in spans if span.source_index is not None)
+    cuda_frames = not has_overlays and join_uses_cuda_frames(settings, reference, caps)
     command = [
         ffmpeg, "-hide_banner", "-y", "-loglevel", "warning",
         "-stats_period", "0.25", "-progress", "pipe:1", "-nostats",
@@ -981,8 +988,33 @@ def _build_join_video_inputs(
                     chain += f",scale={width}:{height}"
                 chain += f",format={pixel_format}"
             chain += f",setsar={sar}"
-        chain += f",settb=AVTB,setpts=N/({rate_text}*TB)[{label}]"
-        filters.append(chain)
+        effect = (overlays or {}).get(paths[span.source_index]) if span.source_index is not None else None
+        if overlay_active(effect):
+            effect = validate_effects(effect)
+            if not Path(effect.overlay_path).is_file():
+                raise ValueError(f"叠加特效素材不存在：{effect.overlay_path}")
+            # Only the overlay belongs to this per-clip mapping. Other effects
+            # are intentionally excluded from this narrowly scoped operation.
+            effect = EffectSettings(overlay=effect.overlay, overlay_path=effect.overlay_path,
+                                    overlay_kind=effect.overlay_kind, overlay_fps=effect.overlay_fps,
+                                    overlay_opacity=effect.overlay_opacity)
+            base = f"effect_base_{index}"
+            chain += f",settb=AVTB,setpts=N/({rate_text}*TB)[{base}]"
+            filters.append(chain)
+            graph = build_effect_filter_graph(effect, in_label=f"[{base}]", out_label=f"[effect_result_{index}]")
+            # The movie source loops indefinitely; retain clip-relative phase
+            # when an output range or parallel chunk starts inside the clip.
+            graph = graph.replace(
+                f"setpts=N/({effect.overlay_fps:.6f}*TB)[ov]",
+                f"setpts=N/({effect.overlay_fps:.6f}*TB),trim=start={span.source_start:.6f},setpts=PTS-STARTPTS[ov]",
+            )
+            graph = re.sub(r"(?<!\\)\[(bg|ov|ovs|bgs|bgp|ovp)\]",
+                           lambda m: f"[effect_{index}_{m.group(1)}]", graph)
+            filters.append(graph)
+            filters.append(f"[effect_result_{index}]scale={width}:{height},format={pixel_format},setsar={sar},settb=AVTB,setpts=N/({rate_text}*TB)[{label}]")
+        else:
+            chain += f",settb=AVTB,setpts=N/({rate_text}*TB)[{label}]"
+            filters.append(chain)
         labels.append(f"[{label}]")
     if len(labels) > 1:
         filters.append("".join(labels) + f"concat=n={len(labels)}:v=1:a=0[vout]")
@@ -1011,10 +1043,11 @@ def build_join_video_chunk_command(
     output: str,
     settings: ExportSettings,
     caps: Capabilities,
+    *, overlays: Mapping[str, EffectSettings] | None = None,
 ) -> list[str]:
     """Encode one independent video-only chunk for parallel NVDEC work."""
     command, filters, input_count, reference, _duration = _build_join_video_inputs(
-        ffmpeg, paths, spans, media, settings, caps,
+        ffmpeg, paths, spans, media, settings, caps, overlays,
     )
     frame_count = sum(span.frames for span in spans)
     command += ["-filter_complex", ";".join(filters), "-map", "[vout]", "-an"]
@@ -1088,6 +1121,7 @@ def build_gap_preserving_concat_encode_command(
     trim_after_audio: bool = False,
     custom_start: float | None = None,
     custom_end: float | None = None,
+    *, overlays: Mapping[str, EffectSettings] | None = None,
 ) -> list[str]:
     """Seek -> CUDA clip/black-frame concat -> one NVENC encode and audio mux.
 
@@ -1113,6 +1147,22 @@ def build_gap_preserving_concat_encode_command(
     rate_text = f"{rate.numerator}/{rate.denominator}"
     spans = plan_join_video_spans(video_trims, intervals, output_start, output_end, fps, preserve_gaps=preserve_gaps)
     export_duration = sum(span.duration for span in spans)
+    if overlays and any(overlay_active(overlays.get(paths[span.source_index]))
+                        for span in spans if span.source_index is not None):
+        command, filters, input_index, reference, export_duration = _build_join_video_inputs(
+            ffmpeg, paths, spans, media, settings, caps, overlays,
+        )
+        audio_intervals = (
+            [(intervals[0][0] + output_start, export_duration)] if preserve_gaps
+            else [(span.master_start, span.duration) for span in spans]
+        )
+        _append_seeked_master_audio(command, filters, external_audio, audio_intervals, input_index)
+        command += ["-filter_complex", ";".join(filters), "-map", "[vout]", "-map", "[aout]"]
+        command += build_video_args(settings, reference, caps)
+        command += build_audio_encode_args(audio_codec, audio_bitrate, audio_sample_rate, output)
+        _append_video_color_metadata(command, reference)
+        command += ["-map_metadata", "0" if input_index else "-1", "-max_muxing_queue_size", "4096", "-t", f"{export_duration:.6f}", output]
+        return command
     height = _resolution_height(settings.resolution) or reference.height
     width = reference.width if height == reference.height else 2 * math.floor(reference.width * height / reference.height / 2 + 0.5)
     if width <= 0 or height <= 0:
@@ -1184,30 +1234,266 @@ def build_gap_preserving_concat_encode_command(
     return command
 
 
-def make_1080p_proxy_settings(media: MediaInfo, cuda_available: bool = True) -> ExportSettings:
-    color_args: list[str] = []
+@dataclass(frozen=True, slots=True)
+class ProxyFormat:
+    key: str
+    label: str
+    name: str
+    codec: str
+    extension: str
+    profile: str
+    pixel_format: str
+    bit_depth: int
+    container: str
+    audio: str
+    uses_nvenc: bool = False
+
+    @property
+    def extension_label(self) -> str:
+        return self.extension.lstrip(".").upper()
+
+
+# FFmpeg's dnxhd encoder requires yuv422p for DNxHR LB/SQ/HQ and
+# yuv422p10le for HQX; prores_ks requires 10-bit 4:2:2 for 422 profiles.
+PROXY_FORMATS: tuple[ProxyFormat, ...] = (
+    ProxyFormat(
+        key="h264_nvenc",
+        label="H.264 / MP4（NVENC 最快，默认）",
+        name="H.264 NVENC",
+        codec="h264_nvenc",
+        extension=".mp4",
+        profile="",
+        pixel_format="nv12",
+        bit_depth=8,
+        container="mp4",
+        audio="aac",
+        uses_nvenc=True,
+    ),
+    ProxyFormat(
+        key="dnxhr_lb",
+        label="DNxHR LB / MOV（8-bit，最小）",
+        name="DNxHR LB",
+        codec="dnxhd",
+        extension=".mov",
+        profile="dnxhr_lb",
+        pixel_format="yuv422p",
+        bit_depth=8,
+        container="mov",
+        audio="pcm_s24le",
+    ),
+    ProxyFormat(
+        key="dnxhr_sq",
+        label="DNxHR SQ / MOV（8-bit，标准）",
+        name="DNxHR SQ",
+        codec="dnxhd",
+        extension=".mov",
+        profile="dnxhr_sq",
+        pixel_format="yuv422p",
+        bit_depth=8,
+        container="mov",
+        audio="pcm_s24le",
+    ),
+    ProxyFormat(
+        key="dnxhr_hq",
+        label="DNxHR HQ / MOV（8-bit，高质量）",
+        name="DNxHR HQ",
+        codec="dnxhd",
+        extension=".mov",
+        profile="dnxhr_hq",
+        pixel_format="yuv422p",
+        bit_depth=8,
+        container="mov",
+        audio="pcm_s24le",
+    ),
+    ProxyFormat(
+        key="dnxhr_hqx",
+        label="DNxHR HQX / MOV（10-bit）",
+        name="DNxHR HQX",
+        codec="dnxhd",
+        extension=".mov",
+        profile="dnxhr_hqx",
+        pixel_format="yuv422p10le",
+        bit_depth=10,
+        container="mov",
+        audio="pcm_s24le",
+    ),
+    ProxyFormat(
+        key="prores_proxy",
+        label="ProRes 422 Proxy / MOV",
+        name="ProRes 422 Proxy",
+        codec="prores_ks",
+        extension=".mov",
+        profile="proxy",
+        pixel_format="yuv422p10le",
+        bit_depth=10,
+        container="mov",
+        audio="pcm_s24le",
+    ),
+    ProxyFormat(
+        key="prores_lt",
+        label="ProRes 422 LT / MOV",
+        name="ProRes 422 LT",
+        codec="prores_ks",
+        extension=".mov",
+        profile="lt",
+        pixel_format="yuv422p10le",
+        bit_depth=10,
+        container="mov",
+        audio="pcm_s24le",
+    ),
+    ProxyFormat(
+        key="prores_hq",
+        label="ProRes 422 HQ / MOV",
+        name="ProRes 422 HQ",
+        codec="prores_ks",
+        extension=".mov",
+        profile="hq",
+        pixel_format="yuv422p10le",
+        bit_depth=10,
+        container="mov",
+        audio="pcm_s24le",
+    ),
+)
+
+DEFAULT_PROXY_FORMAT = PROXY_FORMATS[0].key
+PROXY_FORMAT_BY_KEY = {fmt.key: fmt for fmt in PROXY_FORMATS}
+
+_PROXY_FORMAT_ALIASES = {
+    "h264": "h264_nvenc",
+    "h264_mp4": "h264_nvenc",
+    "mp4": "h264_nvenc",
+    "dnxhr-lb": "dnxhr_lb",
+    "dnx_hr_lb": "dnxhr_lb",
+    "lb": "dnxhr_lb",
+    "dnxhr-sq": "dnxhr_sq",
+    "sq": "dnxhr_sq",
+    "dnxhr-hq": "dnxhr_hq",
+    "hq": "dnxhr_hq",
+    "dnxhr-hqx": "dnxhr_hqx",
+    "hqx": "dnxhr_hqx",
+    "prores": "prores_proxy",
+    "prores_422_proxy": "prores_proxy",
+    "prores422proxy": "prores_proxy",
+    "prores_422_lt": "prores_lt",
+    "prores422lt": "prores_lt",
+    "prores_422_hq": "prores_hq",
+    "prores422hq": "prores_hq",
+}
+
+
+def proxy_formats() -> tuple[ProxyFormat, ...]:
+    return PROXY_FORMATS
+
+
+def proxy_format_labels() -> list[str]:
+    return [fmt.label for fmt in PROXY_FORMATS]
+
+
+def resolve_proxy_format(value: str | ProxyFormat = DEFAULT_PROXY_FORMAT) -> ProxyFormat:
+    """Resolve a key, short alias or UI label to a proxy format entry."""
+    if isinstance(value, ProxyFormat):
+        return value
+    text = str(value).strip()
+    for fmt in PROXY_FORMATS:
+        if text == fmt.key or text.casefold() == fmt.label.casefold():
+            return fmt
+    normalized = re.sub(r"[\s\-]+", "_", text.casefold())
+    key = _PROXY_FORMAT_ALIASES.get(normalized)
+    if key is None and normalized in PROXY_FORMAT_BY_KEY:
+        key = normalized
+    if key:
+        return PROXY_FORMAT_BY_KEY[key]
+    raise ValueError(f"未知代理格式：{value}；可选：{', '.join(fmt.key for fmt in PROXY_FORMATS)}")
+
+
+def proxy_format_label(value: str | ProxyFormat = DEFAULT_PROXY_FORMAT) -> str:
+    return resolve_proxy_format(value).label
+
+
+def _proxy_color_args(media: MediaInfo, *, video_range: bool) -> list[str]:
+    args: list[str] = []
     for flag, value in (
         ("-color_primaries", media.color_primaries),
         ("-color_trc", media.color_transfer),
         ("-colorspace", media.color_space),
     ):
         if value and value not in {"unknown", "reserved"}:
-            color_args += [flag, value]
+            args += [flag, value]
+    if video_range:
+        args += ["-color_range", "tv"]
     if media.timecode:
-        color_args += ["-timecode", media.timecode]
+        args += ["-timecode", media.timecode]
+    return args
+
+
+def make_proxy_export_settings(
+    media: MediaInfo,
+    cuda_available: bool = True,
+    proxy_format: str | ProxyFormat = DEFAULT_PROXY_FORMAT,
+) -> ExportSettings:
+    """Build settings for a 1080p proxy encode without changing the source."""
+    fmt = resolve_proxy_format(proxy_format)
+    if fmt.uses_nvenc:
+        return ExportSettings(
+            codec=fmt.codec, quality=19, preset="p2", tune="hq",
+            multipass="disabled", split_encode="disabled", resolution="1080p",
+            bit_depth="8-bit", audio="aac", audio_bitrate="320k",
+            decode_mode="cuda" if cuda_available else "cpu",
+            gpu_index=0, gop=max(1, int(round((media.fps or 30.0) * 2))),
+            bframes=0, extra_args=_proxy_color_args(media, video_range=False),
+            profile=fmt.profile, pixel_format=fmt.pixel_format,
+        )
     return ExportSettings(
-        codec="h264_nvenc", quality=19, preset="p2", tune="hq",
+        codec=fmt.codec, quality=0, preset="", tune="",
         multipass="disabled", split_encode="disabled", resolution="1080p",
-        bit_depth="8-bit", audio="aac", audio_bitrate="320k",
-        decode_mode="cuda" if cuda_available else "cpu",
+        bit_depth="10-bit" if fmt.bit_depth > 8 else "8-bit",
+        audio=fmt.audio, audio_bitrate="", decode_mode="cpu",
         gpu_index=0, gop=max(1, int(round((media.fps or 30.0) * 2))),
-        bframes=0, extra_args=color_args,
+        bframes=0, extra_args=_proxy_color_args(media, video_range=True),
+        profile=fmt.profile, pixel_format=fmt.pixel_format,
     )
 
 
-def proxy_output_path(source: str, output_directory: str | Path) -> Path:
+def make_1080p_proxy_settings(
+    media: MediaInfo,
+    cuda_available: bool = True,
+    proxy_format: str | ProxyFormat = DEFAULT_PROXY_FORMAT,
+) -> ExportSettings:
+    return make_proxy_export_settings(media, cuda_available, proxy_format)
+
+
+def build_proxy_encode_command(
+    ffmpeg: str,
+    input_path: str,
+    output_path: str,
+    media: MediaInfo,
+    caps: Capabilities,
+    proxy_format: str | ProxyFormat = DEFAULT_PROXY_FORMAT,
+    *,
+    cuda_available: bool | None = None,
+) -> list[str]:
+    """Build a complete 1080p proxy command for the selected proxy format."""
+    fmt = resolve_proxy_format(proxy_format)
+    if Path(input_path).resolve() == Path(output_path).resolve():
+        raise ValueError("代理输出文件不能覆盖原片。")
+    settings = make_1080p_proxy_settings(
+        media,
+        caps.cuda_decode if cuda_available is None else cuda_available,
+        fmt,
+    )
+    return build_encode_command(
+        ffmpeg, input_path, output_path, settings, media, caps,
+    )
+
+
+def proxy_output_path(
+    source: str,
+    output_directory: str | Path,
+    proxy_format: str | ProxyFormat = DEFAULT_PROXY_FORMAT,
+) -> Path:
     """Keep the source basename so DaVinci Resolve can batch-link proxies."""
-    return Path(output_directory) / f"{Path(source).stem}.mp4"
+    fmt = resolve_proxy_format(proxy_format)
+    return Path(output_directory) / f"{Path(source).stem}{fmt.extension}"
 
 
 def duplicate_proxy_stems(paths: Iterable[str]) -> list[str]:
@@ -1217,11 +1503,18 @@ def duplicate_proxy_stems(paths: Iterable[str]) -> list[str]:
     return sorted(Path(items[0]).stem for items in grouped.values() if len(items) > 1)
 
 
-def proxy_source_conflicts(paths: Iterable[str], output_directory: str | Path) -> list[str]:
-    """Return sources that a Resolve-compatible proxy name would overwrite."""
+def proxy_source_conflicts(
+    paths: Iterable[str],
+    output_directory: str | Path,
+    proxy_format: str | ProxyFormat = DEFAULT_PROXY_FORMAT,
+) -> list[str]:
+    """Return sources whose Resolve-compatible proxy name would overwrite any source."""
+    sources = list(paths)
+    source_keys = {os.path.normcase(str(Path(source).resolve())) for source in sources}
     conflicts: list[str] = []
-    for source in paths:
-        if Path(source).resolve() == proxy_output_path(source, output_directory).resolve():
+    for source in sources:
+        output = proxy_output_path(source, output_directory, proxy_format)
+        if os.path.normcase(str(output.resolve())) in source_keys:
             conflicts.append(source)
     return conflicts
 

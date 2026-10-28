@@ -192,11 +192,14 @@ class Core:
         self._pending={};self._pending_lock=threading.Lock();self._ids=itertools.count(1)
         self._state_lock=threading.Lock();self._properties={};self._observe_errors={}
         self._file_generation=0;self._start_generation=0;self._render_generation=0;self._loading=False
+        self._seek_generation=0;self._restart_generation=0;self._seek_render_floor=0
         self._last_update=0.;self._event_error=None;self._overflow=False
         self._contexts=set();self._render_threads=set();self._stop=threading.Event();self._destroyed=False
         self._thread=None
         configuration={'config':'no','vo':'libmpv','hwdec':'d3d11va','hwdec-software-fallback':'no',
-                       'audio':'no','pause':'yes','terminal':'no','keep-open':'yes','idle':'yes'}
+                       'audio':'no','pause':'yes','terminal':'no','keep-open':'yes','idle':'yes',
+                       'cache-on-disk':'no','demuxer-max-bytes':'32MiB',
+                       'demuxer-max-back-bytes':'8MiB','demuxer-readahead-secs':'2'}
         configuration.update(options or {})
         try:
             for key,value in configuration.items():
@@ -293,7 +296,13 @@ class Core:
         elif kind==EVENT_LOADED:
             with self._state_lock:self._file_generation+=1;self._loading=False
         elif kind in (EVENT_SEEK,EVENT_RESTART):
-            with self._state_lock:self._properties['seeking']=kind==EVENT_SEEK
+            with self._state_lock:
+                self._properties['seeking']=kind==EVENT_SEEK
+                if kind==EVENT_SEEK:
+                    self._seek_generation+=1
+                    self._seek_render_floor=self._render_generation
+                else:
+                    self._restart_generation=self._seek_generation
         elif kind==EVENT_OVERFLOW:
             with self._state_lock:self._overflow=True
         elif kind==EVENT_SHUTDOWN:self._stop.set()
@@ -302,6 +311,8 @@ class Core:
             result=copy.deepcopy(self._properties)
             result.update(file_generation=self._file_generation,start_generation=self._start_generation,
                 render_generation=self._render_generation if render_generation is None else render_generation,
+                seek_generation=self._seek_generation,restart_generation=self._restart_generation,
+                seek_render_floor=self._seek_render_floor,
                 loading=self._loading,last_property_update=self._last_update,event_error=self._event_error,
                 event_queue_overflow=self._overflow,observe_errors=dict(self._observe_errors))
         return result
