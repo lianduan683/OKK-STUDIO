@@ -68,14 +68,14 @@ class MpvControllerTests(unittest.TestCase):
         self.assertIn("--screenshot-high-bit-depth=no", MPV_SCREENSHOT_OPTIONS)
         self.assertIn("--screenshot-sw=no", MPV_SCREENSHOT_OPTIONS)
 
-    def test_preview_uses_rtx_gpu_without_copy_back(self):
+    def test_preview_uses_vendor_neutral_d3d11_gpu_without_copy_back(self):
         self.assertIn("--hwdec=d3d11va,nvdec", MPV_GPU_PLAYBACK_OPTIONS)
         self.assertIn("--hwdec-software-fallback=no", MPV_GPU_PLAYBACK_OPTIONS)
         self.assertIn("--hwdec-codecs=all", MPV_GPU_PLAYBACK_OPTIONS)
         self.assertIn("--vo=gpu-next", MPV_GPU_PLAYBACK_OPTIONS)
         self.assertIn("--gpu-api=d3d11", MPV_GPU_PLAYBACK_OPTIONS)
         self.assertIn("--gpu-context=d3d11", MPV_GPU_PLAYBACK_OPTIONS)
-        self.assertIn("--d3d11-adapter=NVIDIA", MPV_GPU_PLAYBACK_OPTIONS)
+        self.assertFalse(any(option.startswith('--d3d11-adapter=') for option in MPV_GPU_PLAYBACK_OPTIONS))
         self.assertFalse(any("-copy" in option for option in MPV_GPU_PLAYBACK_OPTIONS))
 
     def test_each_viewer_has_bounded_demux_cache_without_disk_spill(self):

@@ -31,7 +31,11 @@ def descendants(parent):
 
 class DeliveryTkTests(unittest.TestCase):
     def setUp(self):
+        self.session_directory = tempfile.TemporaryDirectory(prefix='delivery-session-')
+        self.addCleanup(self.session_directory.cleanup)
         self.patches = [
+            mock.patch('studio_project.app_directory', return_value=Path(self.session_directory.name)),
+            mock.patch.object(ExporterApp, '_offer_session_recovery'),
             mock.patch.object(ExporterApp, "_detect_async"),
             mock.patch.object(ExporterApp, "_poll_editor_player"),
             mock.patch.object(ExporterApp, "_poll_gpu"),

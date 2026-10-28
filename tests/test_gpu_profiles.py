@@ -54,6 +54,7 @@ class GpuProfileTests(unittest.TestCase):
 
     def test_supported_desktop_engine_counts(self) -> None:
         cases = {
+            "NVIDIA GeForce RTX 4050": ("Ada Lovelace", 1),
             "NVIDIA GeForce RTX 4060": ("Ada Lovelace", 1),
             "NVIDIA GeForce RTX 4060 Ti": ("Ada Lovelace", 1),
             "NVIDIA GeForce RTX 4070 SUPER": ("Ada Lovelace", 1),
@@ -76,6 +77,7 @@ class GpuProfileTests(unittest.TestCase):
 
     def test_supported_laptop_engine_counts(self) -> None:
         cases = {
+            "NVIDIA GeForce RTX 4050 Laptop GPU": 1,
             "NVIDIA GeForce RTX 4060 Laptop GPU": 1,
             "NVIDIA GeForce RTX 4070 Laptop GPU": 1,
             "NVIDIA GeForce RTX 4080 Laptop GPU": 2,
@@ -96,6 +98,14 @@ class GpuProfileTests(unittest.TestCase):
         self.assertTrue(profile.in_supported_range)
         self.assertEqual(profile.nvenc_engines, 1)
         self.assertIn("兼容模式", profile.architecture)
+
+    def test_non_nvidia_profiles_do_not_claim_nvenc_engines(self):
+        for name, vendor in [('AMD Radeon RX 7600','amd'), ('Intel Arc A380','intel'), ('','unknown')]:
+            profile = classify_gpu(name)
+            self.assertEqual(profile.vendor,vendor)
+            self.assertEqual(profile.nvenc_engines,0)
+            self.assertEqual(profile.recommended_proxy_parallel,1)
+            self.assertFalse(profile.hardware_av1)
 
     def test_workstation_name_is_not_misclassified_as_geforce_50_series(self) -> None:
         profile = classify_gpu("NVIDIA RTX 5000 Ada Generation")

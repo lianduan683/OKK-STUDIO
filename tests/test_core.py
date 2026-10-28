@@ -79,7 +79,7 @@ class CoreTests(unittest.TestCase):
 
         with patch("exporter_core.find_binary", side_effect=lambda name, app_dir=None: name), patch(
             "exporter_core._run_text", side_effect=fake_run
-        ):
+        ), patch("exporter_core._probe_hardware_encoder", return_value=(True, '')):
             caps = detect_capabilities("app")
 
         self.assertEqual(caps.gpu_memory_mb, 16376)
@@ -107,13 +107,14 @@ class CoreTests(unittest.TestCase):
 
         with patch("exporter_core.find_binary", side_effect=lambda name, app_dir=None: name), patch(
             "exporter_core._run_text", side_effect=fake_run
-        ):
+        ), patch("exporter_core._probe_hardware_encoder", side_effect=lambda ffmpeg,ffprobe,codec,depth:
+                 (codec != 'av1_nvenc', 'NVENC driver rejected AV1')):
             caps = detect_capabilities("app")
 
         self.assertEqual(caps.gpu_profile.architecture, "Ampere")
         self.assertTrue(caps.gpu_profile.in_supported_range)
         self.assertEqual(caps.nvenc_codecs, {"h264_nvenc", "hevc_nvenc"})
-        self.assertNotIn("av1_nvenc", caps.raw_encoder_help)
+        self.assertIn("av1_nvenc", caps.encoder_probe_errors)
 
     def test_h264_does_not_use_split_encode_or_main10(self) -> None:
         settings = ExportSettings(codec="h264_nvenc", bit_depth="auto", split_encode="forced")

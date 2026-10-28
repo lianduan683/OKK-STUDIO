@@ -122,6 +122,16 @@ class SessionLoopTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'readback'): self.session.screenshot('unused.bmp')
         self.run_loop()
         self.assertEqual(self.session._readbacks,0)
+    def test_explicit_vendor_uses_one_shared_device_for_both_libmpv_contexts(self):
+        self.session.adapter_preference='amd';devices=[]
+        for core in self.cores:
+            context=core.context
+            core.create_context=lambda device,wake,context=context:(devices.append(device),context)[1]
+        with patch('gpu_live_session.D3D11Compositor',return_value=self.graphics) as factory:
+            self.session._run()
+        self.assertIsNone(self.session._error)
+        self.assertEqual(devices,[100,100])
+        factory.assert_called_once_with(self.runtime,0,320,180,adapter_preference='amd')
     def test_render_failure_frees_contexts_and_compositor(self):
         with patch.object(self.graphics,'draw',side_effect=RuntimeError('device lost')):
             with patch('gpu_live_session.D3D11Compositor',return_value=self.graphics): self.session._run()
