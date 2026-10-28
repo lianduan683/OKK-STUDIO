@@ -1,0 +1,1531 @@
+{
+ "version": 2,
+ "transitions": [
+  {
+   "id": "mask001",
+   "name": "画笔01 Brush 01",
+   "file": "mask001.png",
+   "category": "画笔",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask002",
+   "name": "画笔02 Brush 02",
+   "file": "mask002.png",
+   "category": "画笔",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask003",
+   "name": "画笔03 Brush 03",
+   "file": "mask003.png",
+   "category": "画笔",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask004",
+   "name": "画笔04 Brush 04",
+   "file": "mask004.png",
+   "category": "画笔",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask005",
+   "name": "画笔05 Brush 05",
+   "file": "mask005.png",
+   "category": "画笔",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask006",
+   "name": "画笔06 Brush 06",
+   "file": "mask006.png",
+   "category": "画笔",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask007",
+   "name": "画笔07 Brush 07",
+   "file": "mask007.png",
+   "category": "画笔",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask008",
+   "name": "画笔08 Brush 08",
+   "file": "mask008.png",
+   "category": "画笔",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask009",
+   "name": "画笔09 Brush 09",
+   "file": "mask009.png",
+   "category": "画笔",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask010",
+   "name": "画笔10 Brush 10",
+   "file": "mask010.png",
+   "category": "画笔",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask011",
+   "name": "相机01 Camera Fall",
+   "file": "mask011.png",
+   "category": "相机",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask012",
+   "name": "相机02 Camera Flight",
+   "file": "mask012.png",
+   "category": "相机",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask013",
+   "name": "相机03 Camera Gravity",
+   "file": "mask013.png",
+   "category": "相机",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask014",
+   "name": "相机04 Camera Rotate",
+   "file": "mask014.png",
+   "category": "相机",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask015",
+   "name": "相机05 Camera Simple",
+   "file": "mask015.png",
+   "category": "相机",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask016",
+   "name": "相机06 Camera Skew",
+   "file": "mask016.png",
+   "category": "相机",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask017",
+   "name": "相机07 Camera Slide",
+   "file": "mask017.png",
+   "category": "相机",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask018",
+   "name": "相机08 Camera Tilt",
+   "file": "mask018.png",
+   "category": "相机",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask019",
+   "name": "相机09 Camera View Finder",
+   "file": "mask019.png",
+   "category": "相机",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask020",
+   "name": "相机10 Camera Wave",
+   "file": "mask020.png",
+   "category": "相机",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask021",
+   "name": "Comic 0201 Texture 2",
+   "file": "mask021.png",
+   "category": "Comic 02",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask022",
+   "name": "Comic 0701 rockywall_@2X",
+   "file": "mask022.png",
+   "category": "Comic 07",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask023",
+   "name": "漫画01 Comic 01",
+   "file": "mask023.png",
+   "category": "漫画",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask024",
+   "name": "漫画02 Comic 02",
+   "file": "mask024.png",
+   "category": "漫画",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask025",
+   "name": "漫画03 Comic 03",
+   "file": "mask025.png",
+   "category": "漫画",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask026",
+   "name": "漫画04 Comic 04",
+   "file": "mask026.png",
+   "category": "漫画",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask027",
+   "name": "漫画05 Comic 05",
+   "file": "mask027.png",
+   "category": "漫画",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask028",
+   "name": "漫画06 Comic 06",
+   "file": "mask028.png",
+   "category": "漫画",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask029",
+   "name": "漫画07 Comic 07",
+   "file": "mask029.png",
+   "category": "漫画",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask030",
+   "name": "漫画08 Comic 08",
+   "file": "mask030.png",
+   "category": "漫画",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask031",
+   "name": "漫画09 Comic 09",
+   "file": "mask031.png",
+   "category": "漫画",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask032",
+   "name": "漫画10 Comic 10",
+   "file": "mask032.png",
+   "category": "漫画",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask033",
+   "name": "优雅01 Elegant 01",
+   "file": "mask033.png",
+   "category": "优雅",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask034",
+   "name": "优雅02 Elegant 02",
+   "file": "mask034.png",
+   "category": "优雅",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask035",
+   "name": "优雅03 Elegant 03",
+   "file": "mask035.png",
+   "category": "优雅",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask036",
+   "name": "优雅04 Elegant 04",
+   "file": "mask036.png",
+   "category": "优雅",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask037",
+   "name": "优雅05 Elegant 05",
+   "file": "mask037.png",
+   "category": "优雅",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask038",
+   "name": "优雅06 Elegant 06",
+   "file": "mask038.png",
+   "category": "优雅",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask039",
+   "name": "优雅07 Elegant 07",
+   "file": "mask039.png",
+   "category": "优雅",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask040",
+   "name": "优雅08 Elegant 08",
+   "file": "mask040.png",
+   "category": "优雅",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask041",
+   "name": "优雅09 Elegant 09",
+   "file": "mask041.png",
+   "category": "优雅",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask042",
+   "name": "优雅10 Elegant 10",
+   "file": "mask042.png",
+   "category": "优雅",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask043",
+   "name": "火焰01 Fire 01",
+   "file": "mask043.png",
+   "category": "火焰",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask044",
+   "name": "火焰02 Fire 02",
+   "file": "mask044.png",
+   "category": "火焰",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask045",
+   "name": "火焰03 Fire 03",
+   "file": "mask045.png",
+   "category": "火焰",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask046",
+   "name": "火焰04 Fire 04",
+   "file": "mask046.png",
+   "category": "火焰",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask047",
+   "name": "火焰05 Fire 05",
+   "file": "mask047.png",
+   "category": "火焰",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask048",
+   "name": "闪光01 Flare 01",
+   "file": "mask048.png",
+   "category": "闪光",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask049",
+   "name": "闪光02 Flare 02",
+   "file": "mask049.png",
+   "category": "闪光",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask050",
+   "name": "闪光03 Flare 03",
+   "file": "mask050.png",
+   "category": "闪光",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask051",
+   "name": "闪光04 Flare 04",
+   "file": "mask051.png",
+   "category": "闪光",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask052",
+   "name": "闪光05 Flare 05",
+   "file": "mask052.png",
+   "category": "闪光",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask053",
+   "name": "闪光06 Flare 06",
+   "file": "mask053.png",
+   "category": "闪光",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask054",
+   "name": "闪光07 Flare 07",
+   "file": "mask054.png",
+   "category": "闪光",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask055",
+   "name": "闪光08 Flare 08",
+   "file": "mask055.png",
+   "category": "闪光",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask056",
+   "name": "闪光09 Flare 09",
+   "file": "mask056.png",
+   "category": "闪光",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask057",
+   "name": "闪光10 Flare 10",
+   "file": "mask057.png",
+   "category": "闪光",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask058",
+   "name": "故障01 Glitch Alien",
+   "file": "mask058.png",
+   "category": "故障",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask059",
+   "name": "故障02 Glitch Bad Signal",
+   "file": "mask059.png",
+   "category": "故障",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask060",
+   "name": "故障03 Glitch Fail Render",
+   "file": "mask060.png",
+   "category": "故障",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask061",
+   "name": "故障04 Glitch Forward",
+   "file": "mask061.png",
+   "category": "故障",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask062",
+   "name": "故障05 Glitch HUD",
+   "file": "mask062.png",
+   "category": "故障",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask063",
+   "name": "故障06 Glitch Old TV",
+   "file": "mask063.png",
+   "category": "故障",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask064",
+   "name": "故障07 Glitch Optical Distort",
+   "file": "mask064.png",
+   "category": "故障",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask065",
+   "name": "故障08 Glitch Pixel",
+   "file": "mask065.png",
+   "category": "故障",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask066",
+   "name": "故障09 Glitch Signal Interference",
+   "file": "mask066.png",
+   "category": "故障",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask067",
+   "name": "故障10 Glitch Simple Block",
+   "file": "mask067.png",
+   "category": "故障",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask068",
+   "name": "墨水01 Ink 01",
+   "file": "mask068.png",
+   "category": "墨水",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask069",
+   "name": "墨水02 Ink 02",
+   "file": "mask069.png",
+   "category": "墨水",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask070",
+   "name": "墨水03 Ink 03",
+   "file": "mask070.png",
+   "category": "墨水",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask071",
+   "name": "墨水04 Ink 04",
+   "file": "mask071.png",
+   "category": "墨水",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask072",
+   "name": "墨水05 Ink 05",
+   "file": "mask072.png",
+   "category": "墨水",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask073",
+   "name": "墨水06 Ink 06",
+   "file": "mask073.png",
+   "category": "墨水",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask074",
+   "name": "墨水07 Ink 07",
+   "file": "mask074.png",
+   "category": "墨水",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask075",
+   "name": "墨水08 Ink 08",
+   "file": "mask075.png",
+   "category": "墨水",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask076",
+   "name": "墨水09 Ink 09",
+   "file": "mask076.png",
+   "category": "墨水",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask077",
+   "name": "墨水10 Ink 10",
+   "file": "mask077.png",
+   "category": "墨水",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask078",
+   "name": "万花筒01 Kaleidoscope 01",
+   "file": "mask078.png",
+   "category": "万花筒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask079",
+   "name": "万花筒02 Kaleidoscope 02",
+   "file": "mask079.png",
+   "category": "万花筒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask080",
+   "name": "万花筒03 Kaleidoscope 03",
+   "file": "mask080.png",
+   "category": "万花筒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask081",
+   "name": "万花筒04 Kaleidoscope 04",
+   "file": "mask081.png",
+   "category": "万花筒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask082",
+   "name": "万花筒05 Kaleidoscope 05",
+   "file": "mask082.png",
+   "category": "万花筒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask083",
+   "name": "光线泄漏01 Light Leak 01",
+   "file": "mask083.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask084",
+   "name": "光线泄漏02 Light Leak 02",
+   "file": "mask084.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask085",
+   "name": "光线泄漏03 Light Leak 03",
+   "file": "mask085.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask086",
+   "name": "光线泄漏04 Light Leak 04",
+   "file": "mask086.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask087",
+   "name": "光线泄漏05 Light Leak 05",
+   "file": "mask087.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask088",
+   "name": "光线泄漏06 Light Leak 06",
+   "file": "mask088.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask089",
+   "name": "光线泄漏07 Light Leak 07",
+   "file": "mask089.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask090",
+   "name": "光线泄漏08 Light Leak 08",
+   "file": "mask090.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask091",
+   "name": "光线泄漏09 Light Leak 09",
+   "file": "mask091.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask092",
+   "name": "光线泄漏10 Light Leak 10",
+   "file": "mask092.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask093",
+   "name": "光线泄漏11 Light Leak 11",
+   "file": "mask093.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask094",
+   "name": "光线泄漏12 Light Leak 12",
+   "file": "mask094.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask095",
+   "name": "光线泄漏13 Light Leak 13",
+   "file": "mask095.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask096",
+   "name": "光线泄漏14 Light Leak 14",
+   "file": "mask096.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask097",
+   "name": "光线泄漏15 Light Leak 15",
+   "file": "mask097.png",
+   "category": "光线泄漏",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask098",
+   "name": "视差01 Parallax 01",
+   "file": "mask098.png",
+   "category": "视差",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask099",
+   "name": "视差02 Parallax 02",
+   "file": "mask099.png",
+   "category": "视差",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask100",
+   "name": "视差03 Parallax 03",
+   "file": "mask100.png",
+   "category": "视差",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask101",
+   "name": "视差04 Parallax 04",
+   "file": "mask101.png",
+   "category": "视差",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask102",
+   "name": "视差05 Parallax 05",
+   "file": "mask102.png",
+   "category": "视差",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask103",
+   "name": "视差06 Parallax 06",
+   "file": "mask103.png",
+   "category": "视差",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask104",
+   "name": "视差07 Parallax 07",
+   "file": "mask104.png",
+   "category": "视差",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask105",
+   "name": "视差08 Parallax 08",
+   "file": "mask105.png",
+   "category": "视差",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask106",
+   "name": "视差09 Parallax 09",
+   "file": "mask106.png",
+   "category": "视差",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask107",
+   "name": "视差10 Parallax 10",
+   "file": "mask107.png",
+   "category": "视差",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask108",
+   "name": "透视01 Perspective Bounce",
+   "file": "mask108.png",
+   "category": "透视",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask109",
+   "name": "透视02 Perspective Disk",
+   "file": "mask109.png",
+   "category": "透视",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask110",
+   "name": "透视03 Perspective Simple",
+   "file": "mask110.png",
+   "category": "透视",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask111",
+   "name": "透视04 Perspective Spin",
+   "file": "mask111.png",
+   "category": "透视",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask112",
+   "name": "形状擦除01 Shape Wipe 01",
+   "file": "mask112.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask113",
+   "name": "形状擦除02 Shape Wipe 02",
+   "file": "mask113.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask114",
+   "name": "形状擦除03 Shape Wipe 03",
+   "file": "mask114.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask115",
+   "name": "形状擦除04 Shape Wipe 04",
+   "file": "mask115.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask116",
+   "name": "形状擦除05 Shape Wipe 05",
+   "file": "mask116.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask117",
+   "name": "形状擦除06 Shape Wipe 06",
+   "file": "mask117.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask118",
+   "name": "形状擦除07 Shape Wipe 07",
+   "file": "mask118.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask119",
+   "name": "形状擦除08 Shape Wipe 08",
+   "file": "mask119.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask120",
+   "name": "形状擦除09 Shape Wipe 09",
+   "file": "mask120.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask121",
+   "name": "形状擦除10 Shape Wipe 10",
+   "file": "mask121.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask122",
+   "name": "形状擦除11 Shape Wipe 11",
+   "file": "mask122.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask123",
+   "name": "形状擦除12 Shape Wipe 12",
+   "file": "mask123.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask124",
+   "name": "形状擦除13 Shape Wipe 13",
+   "file": "mask124.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask125",
+   "name": "形状擦除14 Shape Wipe 14",
+   "file": "mask125.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask126",
+   "name": "形状擦除15 Shape Wipe 15",
+   "file": "mask126.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask127",
+   "name": "形状擦除16 Shape Wipe 16",
+   "file": "mask127.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask128",
+   "name": "形状擦除17 Shape Wipe 17",
+   "file": "mask128.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask129",
+   "name": "形状擦除18 Shape Wipe 18",
+   "file": "mask129.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask130",
+   "name": "形状擦除19 Shape Wipe 19",
+   "file": "mask130.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask131",
+   "name": "形状擦除20 Shape Wipe 20",
+   "file": "mask131.png",
+   "category": "形状擦除",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask132",
+   "name": "幻灯片01 SlideShow 5 Arrow",
+   "file": "mask132.png",
+   "category": "幻灯片",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask133",
+   "name": "幻灯片02 SlideShow Arrow",
+   "file": "mask133.png",
+   "category": "幻灯片",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask134",
+   "name": "幻灯片03 SlideShow Clock",
+   "file": "mask134.png",
+   "category": "幻灯片",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask135",
+   "name": "幻灯片04 SlideShow Double Circles",
+   "file": "mask135.png",
+   "category": "幻灯片",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask136",
+   "name": "幻灯片05 SlideShow Linear",
+   "file": "mask136.png",
+   "category": "幻灯片",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask137",
+   "name": "幻灯片06 SlideShow Saws",
+   "file": "mask137.png",
+   "category": "幻灯片",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask138",
+   "name": "幻灯片07 SlideShow Single Circle",
+   "file": "mask138.png",
+   "category": "幻灯片",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask139",
+   "name": "幻灯片08 SlideShow Slide",
+   "file": "mask139.png",
+   "category": "幻灯片",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask140",
+   "name": "幻灯片09 SlideShow Spiral",
+   "file": "mask140.png",
+   "category": "幻灯片",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask141",
+   "name": "幻灯片10 SlideShow Tiles",
+   "file": "mask141.png",
+   "category": "幻灯片",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask142",
+   "name": "烟雾01 Smoke 01",
+   "file": "mask142.png",
+   "category": "烟雾",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask143",
+   "name": "烟雾02 Smoke 02",
+   "file": "mask143.png",
+   "category": "烟雾",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask144",
+   "name": "烟雾03 Smoke 03",
+   "file": "mask144.png",
+   "category": "烟雾",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask145",
+   "name": "烟雾04 Smoke 04",
+   "file": "mask145.png",
+   "category": "烟雾",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask146",
+   "name": "烟雾05 Smoke 05",
+   "file": "mask146.png",
+   "category": "烟雾",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask147",
+   "name": "分割01 Split 2 Part",
+   "file": "mask147.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask148",
+   "name": "分割02 Split 3 Part",
+   "file": "mask148.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask149",
+   "name": "分割03 Split 4 Part",
+   "file": "mask149.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask150",
+   "name": "分割04 Split 5 Part",
+   "file": "mask150.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask151",
+   "name": "分割05 Split Arrow",
+   "file": "mask151.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask152",
+   "name": "分割06 Split Center",
+   "file": "mask152.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask153",
+   "name": "分割07 Split Circle",
+   "file": "mask153.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask154",
+   "name": "分割08 Split Diagonal",
+   "file": "mask154.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask155",
+   "name": "分割09 Split Grid",
+   "file": "mask155.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask156",
+   "name": "分割10 Split Hexagon",
+   "file": "mask156.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask157",
+   "name": "分割11 Split Pattern",
+   "file": "mask157.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask158",
+   "name": "分割12 Split Stripes",
+   "file": "mask158.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask159",
+   "name": "分割13 Split Triangle",
+   "file": "mask159.png",
+   "category": "分割",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask160",
+   "name": "喷洒01 Spray 01",
+   "file": "mask160.png",
+   "category": "喷洒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask161",
+   "name": "喷洒02 Spray 02",
+   "file": "mask161.png",
+   "category": "喷洒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask162",
+   "name": "喷洒03 Spray 03",
+   "file": "mask162.png",
+   "category": "喷洒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask163",
+   "name": "喷洒04 Spray 04",
+   "file": "mask163.png",
+   "category": "喷洒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask164",
+   "name": "喷洒05 Spray 05",
+   "file": "mask164.png",
+   "category": "喷洒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask165",
+   "name": "喷洒06 Spray 06",
+   "file": "mask165.png",
+   "category": "喷洒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask166",
+   "name": "喷洒07 Spray 07",
+   "file": "mask166.png",
+   "category": "喷洒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask167",
+   "name": "喷洒08 Spray 08",
+   "file": "mask167.png",
+   "category": "喷洒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask168",
+   "name": "喷洒09 Spray 09",
+   "file": "mask168.png",
+   "category": "喷洒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask169",
+   "name": "喷洒10 Spray 10",
+   "file": "mask169.png",
+   "category": "喷洒",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask170",
+   "name": "伸展01 Stretch Center",
+   "file": "mask170.png",
+   "category": "伸展",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask171",
+   "name": "伸展02 Stretch Elastic",
+   "file": "mask171.png",
+   "category": "伸展",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask172",
+   "name": "伸展03 Stretch Scale",
+   "file": "mask172.png",
+   "category": "伸展",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask173",
+   "name": "伸展04 Stretch Simple",
+   "file": "mask173.png",
+   "category": "伸展",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask174",
+   "name": "排版01 Typography 01",
+   "file": "mask174.png",
+   "category": "排版",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask175",
+   "name": "排版02 Typography 02",
+   "file": "mask175.png",
+   "category": "排版",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask176",
+   "name": "排版03 Typography 03",
+   "file": "mask176.png",
+   "category": "排版",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask177",
+   "name": "排版04 Typography 04",
+   "file": "mask177.png",
+   "category": "排版",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask178",
+   "name": "排版05 Typography 05",
+   "file": "mask178.png",
+   "category": "排版",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask179",
+   "name": "排版06 Typography 06",
+   "file": "mask179.png",
+   "category": "排版",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask180",
+   "name": "排版07 Typography 07",
+   "file": "mask180.png",
+   "category": "排版",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask181",
+   "name": "排版08 Typography 08",
+   "file": "mask181.png",
+   "category": "排版",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask182",
+   "name": "排版09 Typography 09",
+   "file": "mask182.png",
+   "category": "排版",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask183",
+   "name": "排版10 Typography 10",
+   "file": "mask183.png",
+   "category": "排版",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask184",
+   "name": "扭曲01 Warp Bounce",
+   "file": "mask184.png",
+   "category": "扭曲",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask185",
+   "name": "扭曲02 Warp Elastic",
+   "file": "mask185.png",
+   "category": "扭曲",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask186",
+   "name": "扭曲03 Warp Flat",
+   "file": "mask186.png",
+   "category": "扭曲",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask187",
+   "name": "扭曲04 Warp Hit",
+   "file": "mask187.png",
+   "category": "扭曲",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask188",
+   "name": "扭曲05 Warp Jump In",
+   "file": "mask188.png",
+   "category": "扭曲",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask189",
+   "name": "扭曲06 Warp Jump Out",
+   "file": "mask189.png",
+   "category": "扭曲",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask190",
+   "name": "扭曲07 Warp Panoramic Long",
+   "file": "mask190.png",
+   "category": "扭曲",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask191",
+   "name": "扭曲08 Warp Panoramic Short",
+   "file": "mask191.png",
+   "category": "扭曲",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask192",
+   "name": "扭曲09 Warp Skew",
+   "file": "mask192.png",
+   "category": "扭曲",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask193",
+   "name": "扭曲10 Warp Spin 180",
+   "file": "mask193.png",
+   "category": "扭曲",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask194",
+   "name": "缩放01 Zoom Chromatic",
+   "file": "mask194.png",
+   "category": "缩放",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask195",
+   "name": "缩放02 Zoom Elastic",
+   "file": "mask195.png",
+   "category": "缩放",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask196",
+   "name": "缩放03 Zoom Flat",
+   "file": "mask196.png",
+   "category": "缩放",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask197",
+   "name": "缩放04 Zoom Hit",
+   "file": "mask197.png",
+   "category": "缩放",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask198",
+   "name": "缩放05 Zoom Optic",
+   "file": "mask198.png",
+   "category": "缩放",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask199",
+   "name": "缩放06 Zoom Power",
+   "file": "mask199.png",
+   "category": "缩放",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask200",
+   "name": "缩放07 Zoom Shake",
+   "file": "mask200.png",
+   "category": "缩放",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask201",
+   "name": "缩放08 Zoom Speed Light",
+   "file": "mask201.png",
+   "category": "缩放",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask202",
+   "name": "缩放09 Zoom Twirl",
+   "file": "mask202.png",
+   "category": "缩放",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask203",
+   "name": "缩放10 Zoom Wave",
+   "file": "mask203.png",
+   "category": "缩放",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask204",
+   "name": "15款漏光转场 Light Leak01 Light Leak 01",
+   "file": "mask204.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask205",
+   "name": "15款漏光转场 Light Leak02 Light Leak 02",
+   "file": "mask205.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask206",
+   "name": "15款漏光转场 Light Leak03 Light Leak 03",
+   "file": "mask206.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask207",
+   "name": "15款漏光转场 Light Leak04 Light Leak 04",
+   "file": "mask207.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask208",
+   "name": "15款漏光转场 Light Leak05 Light Leak 05",
+   "file": "mask208.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask209",
+   "name": "15款漏光转场 Light Leak06 Light Leak 06",
+   "file": "mask209.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask210",
+   "name": "15款漏光转场 Light Leak07 Light Leak 07",
+   "file": "mask210.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask211",
+   "name": "15款漏光转场 Light Leak08 Light Leak 08",
+   "file": "mask211.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask212",
+   "name": "15款漏光转场 Light Leak09 Light Leak 09",
+   "file": "mask212.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask213",
+   "name": "15款漏光转场 Light Leak10 Light Leak 10",
+   "file": "mask213.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask214",
+   "name": "15款漏光转场 Light Leak11 Light Leak 11",
+   "file": "mask214.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask215",
+   "name": "15款漏光转场 Light Leak12 Light Leak 12",
+   "file": "mask215.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask216",
+   "name": "15款漏光转场 Light Leak13 Light Leak 13",
+   "file": "mask216.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask217",
+   "name": "15款漏光转场 Light Leak14 Light Leak 14",
+   "file": "mask217.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  },
+  {
+   "id": "mask218",
+   "name": "15款漏光转场 Light Leak15 Light Leak 15",
+   "file": "mask218.png",
+   "category": "15款漏光转场 Light Leak",
+   "source": "Y044 达芬奇转场插件合集"
+  }
+ ]
+}
