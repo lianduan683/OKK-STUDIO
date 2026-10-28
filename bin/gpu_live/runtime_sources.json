@@ -1,0 +1,43 @@
+{
+  "publisher": "shinchiro/mpv-winbuild-cmake (third-party Windows build linked from mpv.io/installation)",
+  "release_tag": "20261021",
+  "mpv_commit": "e471496c56",
+  "archive_url": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261021/mpv-dev-x86_64-20261021-git-e471496c56.7z",
+  "archive_sha256": "efc719eff3dc5954b4a5efc800632808bcec01cc9034940dd14e5eb7fe9ea633",
+  "archive_bytes": 31622190,
+  "runtime_files": [
+    {
+      "name": "libmpv-2.dll",
+      "bytes": 121108480,
+      "sha256": "04e4d27dc385dc18ddd93fbe69c75e635b864f3c6ec53a9122df54c2f7842f4a"
+    }
+  ],
+  "license_files": [
+    {
+      "file": "mpv-Copyright",
+      "url": "https://raw.githubusercontent.com/mpv-player/mpv/e471496c56/Copyright"
+    },
+    {
+      "file": "mpv-LICENSE.GPL",
+      "url": "https://raw.githubusercontent.com/mpv-player/mpv/e471496c56/LICENSE.GPL"
+    },
+    {
+      "file": "mpv-LICENSE.LGPL",
+      "url": "https://raw.githubusercontent.com/mpv-player/mpv/e471496c56/LICENSE.LGPL"
+    }
+  ],
+  "default_mpv_license": "GPLv2-or-later; exact binary includes bundled dependencies, do not describe it as an LGPL-only build",
+  "first_d3d11_api_commit": "4255130de410e0cbdab694b951085409d466b704",
+  "required_client_api": "2.6",
+  "client_api_actual": "2.6",
+  "backend_dispatch_probe": {
+    "d3d11": {
+      "code": -4,
+      "error": "invalid parameter"
+    },
+    "invalid_backend_for_probe": {
+      "code": -19,
+      "error": "operation not implemented"
+    }
+  }
+}
