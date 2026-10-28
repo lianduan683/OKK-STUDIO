@@ -1,0 +1,13 @@
+请把 Windows 版的以下文件放在此文件夹：
+
+ffmpeg.exe
+ffprobe.exe
+mpv.exe（剪辑页内嵌播放器，可选）
+
+要求：FFmpeg 构建必须包含 CUDA/NVDEC/NVENC，并建议使用支持
+split_encode_mode 的新版本。也可以不放在这里，而是将 FFmpeg 的
+bin 文件夹添加到 Windows PATH。
+
+放好后，双击上一级目录中的 start.bat。
+如果要使用“自动对齐音频”，还需双击上一级目录中的
+install_audio_alignment.bat 安装 NumPy。
