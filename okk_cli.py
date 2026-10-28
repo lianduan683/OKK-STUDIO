@@ -20,6 +20,7 @@ from exporter_core import (
     quote_command,
 )
 from editor_core import normalize_audio_bitrate, normalize_video_bitrate
+from hardware_encoders import HARDWARE_ENCODERS, available_codecs, codec_label, preferred_codec
 
 
 INTERMEDIATE_CPU_CODECS = {"dnxhd", "prores", "cfhd", "rawvideo"}
@@ -30,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--headless-export", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--codec", choices=("hevc_nvenc", "h264_nvenc", "av1_nvenc"), default="hevc_nvenc")
+    parser.add_argument("--codec", choices=("auto", *sorted(HARDWARE_ENCODERS), "libx264", "libx265"), default="auto")
     parser.add_argument("--preset", choices=("p1", "p2", "p4", "p6", "p7"), default="p2")
     parser.add_argument("--quality", type=int, default=20)
     parser.add_argument("--bit-depth", choices=("auto", "8-bit", "10-bit"), default="10-bit")
@@ -48,11 +49,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def settings_from_args(args: argparse.Namespace, *, media_codec: str, cuda_available: bool, split_value: str) -> ExportSettings:
+    codec = 'hevc_nvenc' if args.codec == 'auto' else args.codec
     decode_mode = args.decode
     if decode_mode == "auto":
         decode_mode = "cpu" if media_codec.lower() in INTERMEDIATE_CPU_CODECS else ("cuda" if cuda_available else "cpu")
+    if not codec.endswith('_nvenc'):
+        decode_mode = 'cpu'
+        split_value = 'disabled'
     return ExportSettings(
-        codec=args.codec,
+        codec=codec,
         quality=max(0, min(51, int(args.quality))),
         preset=args.preset,
         multipass="disabled" if args.preset in {"p1", "p2"} else ("qres" if args.preset == "p4" else "fullres"),
@@ -106,13 +111,15 @@ def run_headless_cli(argv: Sequence[str], app_dir: str | Path) -> int:
         if source == output:
             raise RuntimeError("最终输出文件不能覆盖中间母版。")
         output.parent.mkdir(parents=True, exist_ok=True)
-        _write_status(status_file, stage="detect", percent=0.0, message="正在检测 FFmpeg 与 NVIDIA GPU…")
+        _write_status(status_file, stage="detect", percent=0.0, message="正在检测 FFmpeg 与显卡编码能力…")
 
         caps = detect_capabilities(app_dir)
         if not caps.ffmpeg_path or not caps.ffprobe_path:
             raise RuntimeError("未找到 ffmpeg.exe 或 ffprobe.exe；请把它们放进软件 bin 文件夹。")
-        if args.codec not in caps.nvenc_codecs:
-            raise RuntimeError(f"当前 FFmpeg 不支持 {args.codec}。")
+        if args.codec == 'auto':
+            args.codec = preferred_codec(caps)
+        if args.codec not in available_codecs(caps):
+            raise RuntimeError(f"当前设备无法初始化 {args.codec}，请检查显卡驱动或选择其他编码器。")
 
         media = probe_media(caps.ffprobe_path, str(source))
         split_value = args.split_encode
@@ -137,7 +144,7 @@ def run_headless_cli(argv: Sequence[str], app_dir: str | Path) -> int:
             status_file,
             stage="encode",
             percent=0.0,
-            message=f"正在使用 {caps.gpu_profile.display_name} NVENC 导出…",
+            message=f"正在使用 {codec_label(settings.codec)} 导出…",
             command=quote_command(command),
         )
         process = subprocess.Popen(

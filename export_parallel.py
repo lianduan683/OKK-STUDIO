@@ -63,7 +63,7 @@ def _worker_budget(settings, pictures, output_size=None):
         if target_height else width * height
         for width, height, _, _, _ in pictures)
     depth_setting = getattr(settings, "bit_depth", "auto")
-    output_ten_bit = (getattr(settings, "codec", "") != "h264_nvenc"
+    output_ten_bit = (getattr(settings, "codec", "") not in {"h264_nvenc", "h264_amf", "h264_qsv"}
                       and (depth_setting == "10-bit" or
                            depth_setting != "8-bit" and any(picture[2] > 8 for picture in pictures)))
     encoded_frame = output_pixels * (3 if output_ten_bit else 1.5)
@@ -106,6 +106,11 @@ def choose_export_workers(settings, caps, media, *, output_size=None) -> int:
     reserve = max(2 * GIB, total * RESERVE_FRACTION)
     available = max(0, total - reserve)
     maximum = min(4, MAX_AUTO_WORKERS)
+    if getattr(getattr(caps, 'gpu_profile', None), 'model', None) == 4050:
+        # The 4050 Laptop has one NVENC engine and a small VRAM budget.
+        # Automatic export stays single-job; an explicit manual choice remains
+        # authoritative in the early return above.
+        maximum = 1
     if not known_memory or not all(picture[4] for picture in pictures):
         maximum = min(maximum, 2)
     return max(1, min(maximum, int(available // _worker_budget(settings, pictures, output_size))))

@@ -1,8 +1,16 @@
-# OKK STUDIO 5.12.0
+# OKK STUDIO 5.12.1
 
-Windows 多机位剪辑与视频导出工具。保留 OKK STUDIO 原有深色工作区，支持媒体库、时间线编辑、调色、转场、字幕、透明图层与 NVENC 导出。
+Windows 多机位剪辑与视频导出工具。保留 OKK STUDIO 原有深色工作区，支持媒体库、时间线编辑、调色、转场、字幕、透明图层与 NVIDIA / AMD / Intel 硬件编码导出。
 
-本次版本：**5.12.0**，标签：**v5.12.0**。
+本次版本：**5.12.1**，标签：**v5.12.1**。
+
+## 5.12.1 显卡适配
+
+- 支持 NVIDIA NVENC、AMD AMF、Intel QSV 的 H.264、HEVC、AV1 编码选择。启动时进行短编码和 10-bit 输出校验，仅显示本机驱动实际可用的编码器；具体格式取决于显卡和驱动。
+- 1080p 代理和单文件、拼接、多机位、透明叠加导出按所选厂商使用对应参数。AMD/Intel 的编码使用各自硬件，复杂画面处理目前采用兼容的 CPU 滤镜路径；不会把 CUDA/NVENC 专用参数套给 AMF/QSV。
+- Windows 监看使用 D3D11/D3D11VA，移除固定 NVIDIA 的适配器限制。
+- RTX 4050 与 RTX 4050 Laptop 名称纳入识别，使用单 NVENC 配置；4050 自动导出并行限制为一路，保留手动选择。
+- 本机实测 AMD Radeon 890M 与 RTX 5090 Laptop：AMF/NVENC 的 H.264、HEVC、AV1 初始化及 HEVC/AV1 10-bit 输出通过，AMF 多机位和透明叠加导出通过。Intel QSV 和 RTX 4050 完成命令、能力选择与回退测试，本机没有这些设备，尚未实机验证。
 
 ## 5.12.0 更新
 
@@ -22,7 +30,7 @@ Windows 多机位剪辑与视频导出工具。保留 OKK STUDIO 原有深色工
 
 1. 保存工程并关闭旧窗口。
 2. 把本版本源码覆盖到已有的 OKK STUDIO 文件夹，保留原有 `bin/`、`assets/` 与用户工程。
-3. 双击 `启动OKK STUDIO.bat`，确认标题显示 **5.12.0**。旧 EXE 不会因替换 Python 源码自动升级。
+3. 双击 `启动OKK STUDIO.bat`，确认标题显示 **5.12.1**。旧 EXE 不会因替换 Python 源码自动升级。
 
 ### 从源码配置
 
@@ -33,7 +41,7 @@ Windows 多机位剪辑与视频导出工具。保留 OKK STUDIO 原有深色工
 - 可选 GPU 导出运行库放在 `bin/gpu_export/`，来源信息见该目录的 `runtime_sources.json`。Gyroflow、ExifTool 属于可选外部组件。
 - 最后运行 `启动OKK STUDIO.bat` 或 `python rtx5090_exporter.py`。
 
-外部工具与 NVIDIA 驱动依各自许可证使用；GPU 功能会依据本机实际能力检测并选择兼容路径。
+外部工具与各厂商显卡驱动依各自许可证使用；GPU 功能会依据本机实际能力检测并选择兼容路径。
 
 ## 代理、透明预览与导出
 
@@ -57,7 +65,7 @@ Windows 多机位剪辑与视频导出工具。保留 OKK STUDIO 原有深色工
 
 ## 原项目说明与致谢
 
-需要部署环境：python 3.11及以上版本（建议python 3.13以上），支持大部分RTX显卡（RTX 4050，RTX 4050 laptop除外），有bug不要压力作者喵，会尝试解决的喵
+需要部署环境：python 3.11及以上版本（建议python 3.13以上），支持大部分RTX显卡（包括 RTX 4050 Laptop），有bug不要压力作者喵，会尝试解决的喵
 
 关注塔菲喵，关注塔菲谢谢喵   
 

@@ -169,7 +169,10 @@ def build_gpu_video_plan(grades,*,ffmpeg_path,width,height,pixel_format,rate_tex
     shader=write_grade_shader(grades,shader_dir)
     active_grade=any(grade is not None and not grade_is_identity(grade) for grade in grades)
     surface='p010le' if pixel_format in ('yuv420p10le','p010le') else 'nv12'
-    global_options=('-init_hw_device','vulkan=okk_vk:NVIDIA','-filter_hw_device','okk_vk')
+    # CUDA interop must stay on NVIDIA. CPU/Vulkan plans have no such vendor
+    # requirement and can use AMD or Intel's default Vulkan adapter as well.
+    device='vulkan=okk_vk:NVIDIA' if decode_mode=='cuda' else 'vulkan=okk_vk'
+    global_options=('-init_hw_device',device,'-filter_hw_device','okk_vk')
     if decode_mode=='vulkan':
         input_options=('-hwaccel','vulkan','-hwaccel_device','okk_vk','-hwaccel_output_format','vulkan');upload=''
     elif decode_mode=='cuda':

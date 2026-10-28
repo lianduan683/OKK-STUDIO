@@ -38,6 +38,7 @@ from gyroflow_core import (StabilizedRange, StabilizationSettings, validate_rang
                            range_from_dict, cache_matches)
 from cache_paths import cache_dir
 from cache_publish import publish_completed
+from hardware_encoders import HARDWARE_ENCODERS, encoder_vendor, is_hardware_codec
 from proxy_cache import find_proxy
 from program_edits import grade_at
 from gpu_export import (GpuExportUnsupported, find_gpu_export_ffmpeg,
@@ -714,10 +715,10 @@ def render_multicam(
     height = _resolution_height(settings.resolution) or reference.height
     width = max(2, round(reference.width * height / reference.height / 2) * 2)
     height = max(2, round(height / 2) * 2)
-    if settings.codec not in {"libx264", "libx265", "h264_nvenc", "hevc_nvenc", "av1_nvenc"}:
+    if settings.codec not in {"libx264", "libx265", *HARDWARE_ENCODERS}:
         raise ValueError("多机位导出暂不支持此视频编码器")
     depth = _target_depth(settings, reference)
-    if settings.codec == "h264_nvenc":
+    if settings.codec in {"h264_nvenc", "h264_amf", "h264_qsv"}:
         depth = 8
     # Software fallback normalizes mixed aspect ratios and unsupported inputs;
     # compatible camera chunks retain CUDA surfaces throughout the pipeline.
@@ -730,11 +731,12 @@ def render_multicam(
     encode_reference = replace(reference, width=width, height=height, fps=project.fps,
                                bit_depth=depth, pixel_format=pixel_format,
                                sample_aspect_ratio="1:1")
-    if settings.codec.endswith("_nvenc"):
+    if is_hardware_codec(settings.codec):
         encode_args = build_video_args(encode_settings, encode_reference, caps)
-        encode_args += ["-gpu", str(settings.gpu_index)]
-        # Delivery exposes the B-frame count explicitly, including P1/P2.
-        encode_args[encode_args.index("-bf") + 1] = str(settings.bframes)
+        if settings.codec.endswith("_nvenc"):
+            encode_args += ["-gpu", str(settings.gpu_index)]
+            # Delivery exposes the B-frame count explicitly, including P1/P2.
+            encode_args[encode_args.index("-bf") + 1] = str(settings.bframes)
         # This renderer normalizes every input with fps= and supplies the same
         # -r for each independent chunk.  The shared single-file exporter uses
         # passthrough, which FFmpeg rejects alongside -r; multicamera chunks
@@ -957,8 +959,8 @@ def render_multicam(
                 graph_path = temporary / f'stack_{index:06d}.filtergraph'
                 graph_path.write_text(command[graph_index+1], encoding='utf-8')
                 command[graph_index:graph_index+2] = ['-/filter_complex', str(graph_path)]
-                phase = (f'合成 {len(segment.layers)} 层画面（任务 {index + 1}/{len(segments)}）'
-                         + (' · NVENC 编码' if settings.codec.endswith('_nvenc') else ' · 软件编码'))
+                backend = {'nvidia':'NVENC', 'amd':'AMF', 'intel':'QSV'}.get(encoder_vendor(settings.codec), '软件')
+                phase = f'合成 {len(segment.layers)} 层画面（任务 {index + 1}/{len(segments)}） · {backend} 编码'
             fallback_command = command
             gpu_commands = []
             if gpu_effect_ffmpeg and segment.path and (isinstance(segment, TransitionSegment) or cuda_filter is None):

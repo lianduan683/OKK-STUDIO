@@ -34,7 +34,6 @@ MPV_GPU_PLAYBACK_OPTIONS = [
     "--vo=gpu-next",
     "--gpu-api=d3d11",
     "--gpu-context=d3d11",
-    "--d3d11-adapter=NVIDIA",
     "--profile=fast",
     # Bound compressed demux packets per viewer. Decoder surfaces, GPU
     # textures and the rest of each process have separate memory costs.
@@ -74,6 +73,13 @@ class MpvController:
             "--hwdec-software-fallback=yes" if self.allow_software_decode and option == "--hwdec-software-fallback=no"
             else option for option in MPV_GPU_PLAYBACK_OPTIONS
         ]
+        try:
+            from gpu_d3d11 import preferred_adapter_name
+            adapter=preferred_adapter_name()
+        except (OSError,RuntimeError,AttributeError):
+            adapter=''
+        if adapter:
+            gpu_options.append('--d3d11-adapter='+adapter)
         args = [
             self.executable,
             "--no-config",
@@ -278,8 +284,8 @@ class MpvController:
                     # is being replaced. Do not reject a supported GPU file
                     # before the asynchronous new decoder has initialized.
                     cpu_fallback = RuntimeError(
-                        "该素材未能启用 RTX 硬件解码，MPV 已回退到 CPU。"
-                        "请更新 NVIDIA 驱动或换用包含 NVDEC/D3D11VA 的 MPV；"
+                        "该素材未能启用 GPU 硬件解码，MPV 已回退到 CPU。"
+                        "请更新显卡驱动或换用包含 D3D11VA 的 MPV；"
                         "若素材编码本身不受显卡支持，请先生成 1080p 代理。"
                     )
                 elif hwdec:
@@ -304,7 +310,7 @@ class MpvController:
             time.sleep(0.08)
         if cpu_fallback is not None:
             raise cpu_fallback
-        raise RuntimeError(f"等待 RTX 硬件解码超时：{last_error or '未读到 hwdec-current'}")
+        raise RuntimeError(f"等待 GPU 硬件解码超时：{last_error or '未读到 hwdec-current'}")
 
     def wait_for_frame(self, target: float, *, timeout: float = 4.0, cancel_event=None) -> float:
         """Wait for a decoded, rendered seek result before raising its HWND.

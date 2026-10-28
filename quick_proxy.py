@@ -22,8 +22,10 @@ from exporter_core import (CREATE_NO_WINDOW, ExportCancelled, parse_progress_lin
 from proxy_cache import register_proxy
 from proxy_media import validate_proxy_media
 
-PARAMETERS = {'version':2,'bounds':[1920,1080],'fps_limit':30,'codec':'h264',
-              'depth':8,'gop_seconds':1,'bframes':0,'audio':'aac-128k-stereo-48k'}
+PARAMETERS = {'version':3,'bounds':[1920,1080],'fps_limit':30,'codec':'h264',
+              'depth':8,'gop_seconds':1,'bframes':0,'audio':'aac-128k-stereo-48k',
+              'encoders':{'nvenc':'p1-cq27-zero-latency','amf':'speed-cqp27-async1',
+                          'qsv':'veryfast-quality27-async1','cpu':'ultrafast-crf26-threads2'}}
 BACKGROUND_FLAGS = CREATE_NO_WINDOW | (0x00004000 if os.name=='nt' else 0)
 
 
@@ -83,6 +85,24 @@ def _proxy_rate(media):
     return Fraction(min(30.,fps)).limit_denominator(100000)
 
 
+def _proxy_modes(caps):
+    """Only capability-probed hardware is tried; every route can fall back."""
+    from hardware_encoders import available_codecs, preferred_codec
+    available=available_codecs(caps)
+    first=preferred_codec(caps,'h264')
+    order=list(dict.fromkeys([first,'h264_nvenc','h264_amf','h264_qsv']))
+    modes=[]
+    for codec in order:
+        if codec not in available:continue
+        if codec=='h264_nvenc':
+            if getattr(caps,'cuda_decode',False) and getattr(caps,'scale_cuda',False):modes.append('cuda_nvenc')
+            modes.append('cpu_nvenc')
+        elif codec=='h264_amf':modes.append('cpu_amf')
+        elif codec=='h264_qsv':modes.append('cpu_qsv')
+    modes.append('cpu')
+    return modes
+
+
 def _build_command(ffmpeg,source,output,media,mode):
     rate=_proxy_rate(media);rate_text=f'{rate.numerator}/{rate.denominator}'
     gop=max(1,math.floor(float(rate)))
@@ -102,10 +122,18 @@ def _build_command(ffmpeg,source,output,media,mode):
         graph=prefix+'scale_cuda='+scale+':interp_algo=bilinear:format=nv12'
     else:
         graph=prefix+'scale='+scale+':flags=fast_bilinear,format=yuv420p'
+        if mode=='cpu_qsv':graph=graph.removesuffix('format=yuv420p')+'format=nv12'
     command+=['-vf',graph,'-fps_mode','cfr']
     if mode.endswith('nvenc'):
         command+=['-c:v','h264_nvenc','-preset','p1','-tune','ull','-rc','vbr',
                   '-cq','27','-b:v','0','-multipass','disabled','-rc-lookahead','0','-zerolatency','1']
+    elif mode=='cpu_amf':
+        command+=['-c:v','h264_amf','-usage','transcoding','-quality','speed','-rc','cqp',
+                  '-qp_i','27','-qp_p','27','-async_depth','1']
+    elif mode=='cpu_qsv':
+        command+=['-c:v','h264_qsv','-preset','veryfast','-global_quality','27',
+                  '-look_ahead','0','-async_depth','1']
+    elif mode!='cpu':raise ValueError('未知代理编码路径：'+str(mode))
     else:
         command+=['-c:v','libx264','-preset','ultrafast','-tune','zerolatency','-crf','26','-threads','2']
     command+=['-g',str(gop),'-bf','0','-refs','1','-c:a','aac','-b:a','128k','-ac','2','-ar','48000',
@@ -207,11 +235,7 @@ def prepare_1080p_proxy(source,ffmpeg,ffprobe,caps,cancel_event=None,progress=No
             register_proxy(source,str(destination))
             if progress:progress(100.,'复用已验证的 1080p 代理')
             return str(destination)
-    modes=[]
-    if 'h264_nvenc' in (getattr(caps,'nvenc_codecs',()) or ()):
-        if getattr(caps,'cuda_decode',False) and getattr(caps,'scale_cuda',False):modes.append('cuda_nvenc')
-        modes.append('cpu_nvenc')
-    modes.append('cpu')
+    modes=_proxy_modes(caps)
     temporary=None
     try:
         descriptor,name=tempfile.mkstemp(prefix='.'+destination.stem[:16]+'.',suffix='.pending.mp4',dir=folder)
@@ -221,6 +245,8 @@ def prepare_1080p_proxy(source,ffmpeg,ffprobe,caps,cancel_event=None,progress=No
             _cancelled(cancel_event)
             phase={'cuda_nvenc':'生成 1080p 代理 · CUDA / NVENC',
                    'cpu_nvenc':'生成 1080p 代理 · NVENC 兼容解码',
+                   'cpu_amf':'生成 1080p 代理 · AMD AMF 硬件编码',
+                   'cpu_qsv':'生成 1080p 代理 · Intel QSV 硬件编码',
                    'cpu':'生成 1080p 代理 · CPU 兼容模式（2 线程）'}[mode]
             if progress:progress(0.,phase)
             try:

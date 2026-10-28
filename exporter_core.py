@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from effects_core import (
 )
 from gpu_profiles import GpuProfile, classify_gpu
 from video_stack import stream_has_alpha
+from hardware_encoders import HARDWARE_ENCODERS, build_portable_video_args, encoder_vendor
 
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -52,7 +54,7 @@ class MediaInfo:
 class Capabilities:
     ffmpeg_path: str | None = None
     ffprobe_path: str | None = None
-    gpu_name: str = "NVIDIA GPU not detected"
+    gpu_name: str = "GPU not detected"
     driver_version: str = "unknown"
     gpu_memory_mb: int = 0
     gpu_profile: GpuProfile = field(default_factory=lambda: classify_gpu(""))
@@ -61,10 +63,25 @@ class Capabilities:
     scale_cuda: bool = False
     split_encode: set[str] = field(default_factory=set)
     raw_encoder_help: dict[str, str] = field(default_factory=dict)
+    amf_codecs: set[str] = field(default_factory=set)
+    qsv_codecs: set[str] = field(default_factory=set)
+    software_codecs: set[str] = field(default_factory=lambda: {'libx264', 'libx265'})
+    gpu_vendor: str = 'unknown'
+    gpu_names: list[str] = field(default_factory=list)
+    ten_bit_codecs: set[str] = field(default_factory=set)
+    hardware_probe_complete: bool = False
+    encoder_probe_errors: dict[str, str] = field(default_factory=dict)
+    compiled_hardware_codecs: set[str] = field(default_factory=set)
+
+    @property
+    def hardware_codecs(self) -> set[str]:
+        return self.nvenc_codecs | self.amf_codecs | self.qsv_codecs
 
     def __post_init__(self) -> None:
-        if not self.gpu_profile.raw_name and self.gpu_name != "NVIDIA GPU not detected":
+        if not self.gpu_profile.raw_name and self.gpu_name not in {"NVIDIA GPU not detected", "GPU not detected"}:
             self.gpu_profile = classify_gpu(self.gpu_name)
+        if self.gpu_vendor == 'unknown':
+            self.gpu_vendor = _gpu_vendor(self.gpu_name)
 
 
 @dataclass(slots=True)
@@ -238,56 +255,119 @@ def _media_info_from_payload(path: str, payload: dict, *, allow_audio_only: bool
     )
 
 
+def _gpu_vendor(name: str) -> str:
+    name = str(name or '').casefold()
+    if any(word in name for word in ('nvidia', 'geforce', 'quadro', 'rtx ')): return 'nvidia'
+    if any(word in name for word in ('amd', 'radeon', 'advanced micro devices')): return 'amd'
+    if 'intel' in name: return 'intel'
+    return 'unknown'
+
+
+def _windows_adapters() -> list[dict]:
+    if os.name != 'nt': return []
+    code, output = _run_text(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+        'Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion | ConvertTo-Json -Compress'], timeout=6)
+    if code: return []
+    try:
+        payload = json.loads(output)
+        rows = payload if isinstance(payload, list) else [payload]
+        return [row for row in rows if isinstance(row, dict) and isinstance(row.get('Name'), str)]
+    except (ValueError, TypeError): return []
+
+
+def _probe_hardware_encoder(ffmpeg, ffprobe, codec, depth=8):
+    """Initialize, encode and inspect two frames; never infer support from -encoders."""
+    try:
+        with tempfile.TemporaryDirectory(prefix='okk_encoder_probe_') as temporary:
+            destination = str(Path(temporary)/'probe.mkv')
+            settings = ExportSettings(codec=codec, preset='p2', quality=26, bframes=0,
+                                      decode_mode='cpu', bit_depth=f'{depth}-bit')
+            reference = MediaInfo('probe', duration=.1, width=256, height=144, fps=30, bit_depth=depth)
+            args = build_video_args(settings, reference, Capabilities())
+            command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+                '-threads', '1', '-filter_threads', '1', '-f', 'lavfi', '-i',
+                'testsrc2=size=256x144:rate=30:duration=0.1', '-frames:v', '2', '-an',
+                '-vf', 'format=p010le' if depth == 10 else 'format=nv12', *args, destination]
+            code, output = _run_text(command, timeout=6)
+            if code or not Path(destination).is_file() or Path(destination).stat().st_size <= 0:
+                return False, (output.strip()[-1200:] or '编码器未输出可验证的视频帧。')
+            code, output = _run_text(_media_probe_command(ffprobe, destination), timeout=4, structured=True)
+            if code: return False, output.strip()[-1200:]
+            media = _media_info_from_payload(destination, json.loads(output))
+            expected = codec.split('_', 1)[0]
+            if not media.has_video or media.video_codec != expected or media.duration <= 0 or media.bit_depth != depth:
+                return False, f'探测输出格式不符：{media.video_codec} / {media.bit_depth}-bit'
+            return True, ''
+    except (OSError, ValueError, RuntimeError) as error:
+        return False, str(error)[-1200:]
+
+
 def detect_capabilities(app_dir: str | Path | None = None) -> Capabilities:
-    ffmpeg = find_binary("ffmpeg", app_dir)
-    ffprobe = find_binary("ffprobe", app_dir)
+    ffmpeg = find_binary('ffmpeg', app_dir)
+    ffprobe = find_binary('ffprobe', app_dir)
     caps = Capabilities(ffmpeg_path=ffmpeg, ffprobe_path=ffprobe)
-
-    smi = find_binary("nvidia-smi", app_dir)
+    adapters = _windows_adapters()
+    caps.gpu_names = list(dict.fromkeys(row['Name'].strip() for row in adapters if row['Name'].strip()))
+    smi = find_binary('nvidia-smi', app_dir)
     if smi:
-        code, output = _run_text([
-            smi,
-            "--query-gpu=name,driver_version,memory.total",
-            "--format=csv,noheader,nounits",
-        ])
+        code, output = _run_text([smi, '--query-gpu=name,driver_version,memory.total',
+                                  '--format=csv,noheader,nounits'])
         if code == 0 and output.strip():
-            first = output.strip().splitlines()[0]
-            parts = [part.strip() for part in first.split(",", 2)]
+            rows = [line.split(',', 2) for line in output.strip().splitlines()]
+            for row in rows:
+                if row[0].strip() not in caps.gpu_names: caps.gpu_names.append(row[0].strip())
+            parts = [part.strip() for part in rows[0]]
             caps.gpu_name = parts[0]
-            if len(parts) > 1:
-                caps.driver_version = parts[1]
+            if len(parts) > 1: caps.driver_version = parts[1]
             if len(parts) > 2:
-                try:
-                    caps.gpu_memory_mb = int(float(parts[2]))
-                except ValueError:
+                try: caps.gpu_memory_mb = int(float(parts[2]))
+                except ValueError: pass
+    if caps.gpu_name == 'GPU not detected' and caps.gpu_names:
+        caps.gpu_name = caps.gpu_names[0]
+        caps.driver_version = next((str(row.get('DriverVersion') or 'unknown') for row in adapters
+                                    if row['Name'].strip() == caps.gpu_name), 'unknown')
+    caps.gpu_profile = classify_gpu(caps.gpu_name)
+    caps.gpu_vendor = _gpu_vendor(caps.gpu_name)
+    if not ffmpeg: return caps
+    _, encoders = _run_text([ffmpeg, '-hide_banner', '-encoders'])
+    caps.software_codecs = {codec for codec in ('libx264', 'libx265') if re.search(rf'\b{codec}\b', encoders)}
+    caps.compiled_hardware_codecs = {codec for codec in HARDWARE_ENCODERS if re.search(rf'\b{codec}\b', encoders)}
+    for codec in sorted(caps.compiled_hardware_codecs):
+        _, help_text = _run_text([ffmpeg, '-hide_banner', '-h', f'encoder={codec}'])
+        caps.raw_encoder_help[codec] = help_text
+        usable, error = _probe_hardware_encoder(ffmpeg, ffprobe, codec, 8) if ffprobe else (False, '缺少 ffprobe，无法验证编码器。')
+        if not usable:
+            caps.encoder_probe_errors[codec] = error
+            continue
+        target = {'nvidia':caps.nvenc_codecs, 'amd':caps.amf_codecs, 'intel':caps.qsv_codecs}[encoder_vendor(codec)]
+        target.add(codec)
+        if codec.endswith('_nvenc') and 'split_encode_mode' in help_text: caps.split_encode.add(codec)
+        if not codec.startswith('h264_'):
+            usable10, error10 = _probe_hardware_encoder(ffmpeg, ffprobe, codec, 10)
+            if usable10: caps.ten_bit_codecs.add(codec)
+            else: caps.encoder_probe_errors[codec+':10-bit'] = error10
+    caps.hardware_probe_complete = True
+    # Choose a usable hardware vendor rather than presenting an unavailable
+    # discrete GPU as the only choice on a hybrid laptop.
+    for vendor, codecs in ((caps.gpu_vendor, caps.hardware_codecs), ('nvidia', caps.nvenc_codecs),
+                           ('amd', caps.amf_codecs), ('intel', caps.qsv_codecs)):
+        if any(encoder_vendor(codec) == vendor for codec in codecs):
+            caps.gpu_vendor = vendor
+            name = next((name for name in caps.gpu_names if _gpu_vendor(name) == vendor), None)
+            if name:
+                if name != caps.gpu_name:
+                    # Win32_VideoController.AdapterRAM truncates modern VRAM
+                    # and is meaningless for UMA: do not reuse another GPU's.
                     caps.gpu_memory_mb = 0
-
+                    caps.driver_version = next((str(row.get('DriverVersion') or 'unknown') for row in adapters
+                                                if row['Name'].strip() == name), 'unknown')
+                caps.gpu_name = name
+            break
     caps.gpu_profile = classify_gpu(caps.gpu_name)
-
-    if not ffmpeg:
-        return caps
-    _, encoders = _run_text([ffmpeg, "-hide_banner", "-encoders"])
-    for codec in ("h264_nvenc", "hevc_nvenc", "av1_nvenc"):
-        if re.search(rf"\b{re.escape(codec)}\b", encoders):
-            # FFmpeg lists every encoder compiled into the executable, not the
-            # codecs implemented by the installed GPU. Known RTX 20/30 models
-            # have no AV1 encoder, so do not expose an option that must fail.
-            if (
-                codec == "av1_nvenc"
-                and caps.gpu_profile.in_supported_range
-                and not caps.gpu_profile.hardware_av1
-            ):
-                continue
-            caps.nvenc_codecs.add(codec)
-            _, help_text = _run_text([ffmpeg, "-hide_banner", "-h", f"encoder={codec}"])
-            caps.raw_encoder_help[codec] = help_text
-            if "split_encode_mode" in help_text:
-                caps.split_encode.add(codec)
-    _, hwaccels = _run_text([ffmpeg, "-hide_banner", "-hwaccels"])
-    caps.cuda_decode = bool(re.search(r"(?m)^cuda\s*$", hwaccels))
-    _, filters = _run_text([ffmpeg, "-hide_banner", "-filters"])
-    caps.scale_cuda = "scale_cuda" in filters
-    caps.gpu_profile = classify_gpu(caps.gpu_name)
+    _, hwaccels = _run_text([ffmpeg, '-hide_banner', '-hwaccels'])
+    caps.cuda_decode = bool(caps.nvenc_codecs and re.search(r'(?m)^cuda\s*$', hwaccels))
+    _, filters = _run_text([ffmpeg, '-hide_banner', '-filters'])
+    caps.scale_cuda = caps.cuda_decode and 'scale_cuda' in filters
     return caps
 
 
@@ -301,7 +381,7 @@ def _target_depth(settings: ExportSettings, media: MediaInfo) -> int:
         return 10
     if settings.bit_depth == "8-bit":
         return 8
-    if settings.codec == "h264_nvenc":
+    if settings.codec in {"h264_nvenc", "h264_amf", "h264_qsv"}:
         return 8
     return 10 if media.bit_depth > 8 else 8
 
@@ -402,7 +482,7 @@ def build_video_filter(
     resize_needed = height is not None and height != media.height
     format_needed = depth != media.bit_depth
 
-    if settings.decode_mode == "cuda":
+    if settings.decode_mode == "cuda" and settings.codec.endswith("_nvenc"):
         if not effect_filters and not overlay_active(validated_effects):
             # The common 8K 10-bit HEVC -> 8K 10-bit HEVC path can pass decoded
             # CUDA frames directly into NVENC. Avoiding a no-op scale/filter saves
@@ -520,6 +600,15 @@ def build_video_args(
         args += list(settings.extra_args)
         return args
 
+    depth = _target_depth(settings, media)
+    if (settings.codec in HARDWARE_ENCODERS and depth > 8
+            and caps.hardware_probe_complete and settings.codec not in caps.ten_bit_codecs):
+        raise ValueError('当前显卡/驱动未通过此编码器的 10-bit 验证，请选择其他编码器或明确设置 8-bit。')
+    if settings.codec.startswith('h264_') and depth > 8:
+        raise ValueError('H.264 硬件编码使用 8-bit；10-bit 请选择 HEVC 或 AV1。')
+    if not settings.codec.endswith('_nvenc'):
+        return build_portable_video_args(settings, depth)
+
     help_text = caps.raw_encoder_help.get(settings.codec, "")
     throughput_mode = settings.preset in {"p1", "p2"}
     args = ["-c:v", settings.codec, "-preset", settings.preset]
@@ -591,7 +680,7 @@ def build_encode_command(
     ]
     if start is not None:
         command += ["-ss", f"{start:.6f}"]
-    if settings.decode_mode == "cuda" and settings.codec not in SOFTWARE_PROXY_ENCODERS:
+    if settings.decode_mode == "cuda" and settings.codec.endswith("_nvenc"):
         command += [
             "-hwaccel", "cuda",
             "-hwaccel_device", str(settings.gpu_index),

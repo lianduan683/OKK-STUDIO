@@ -6,6 +6,7 @@ diagnostic method; normal presentation never calls it. No helper EXE is used.
 from __future__ import annotations
 
 import ctypes as C
+from functools import lru_cache
 from ctypes import wintypes as W
 import os
 from pathlib import Path
@@ -78,10 +79,63 @@ class VideoTexture:
         self.srv.release();self.rtv.release();self.texture.release()
 
 
+def _adapter_matches(vendor, name, preference):
+    if preference is None:return True
+    known={'nvidia':0x10de,'amd':0x1002,'intel':0x8086}
+    requested=preference.strip().lower()
+    return vendor==known[requested] if requested in known else requested in name.lower()
+
+
+def _adapter_priority(dedicated, index):
+    """Prefer a discrete/high-memory device without excluding any vendor."""
+    return max(0,int(dedicated)), -int(index)
+
+
+def _create_factory():
+    owner=Com();create=C.WinDLL('dxgi.dll').CreateDXGIFactory1
+    create.argtypes=[C.POINTER(GUID),C.POINTER(P)];create.restype=HR
+    iid=GUID('770aae78-f26f-4dba-a829-253c83d1b387')
+    check(create(C.byref(iid),C.byref(owner.value)),'CreateDXGIFactory1')
+    return owner
+
+
+def _hardware_candidates(factory, preference=None):
+    candidates=[]
+    for index in range(16):
+        pointer=P();result=call(factory,12,HR,[U,C.POINTER(P)],index,C.byref(pointer))
+        if result<0:break
+        adapter=Com(pointer);desc=AdapterDesc()
+        if (call(pointer,10,HR,[C.POINTER(AdapterDesc)],C.byref(desc))>=0 and not desc.flags&2
+                and _adapter_matches(desc.vendor,str(desc.description),preference)):
+            candidates.append((_adapter_priority(desc.dedicated,index),adapter,str(desc.description)))
+        else:adapter.release()
+    candidates.sort(key=lambda x:x[0],reverse=True)
+    return candidates
+
+
+@lru_cache(maxsize=1)
+def preferred_adapter_name():
+    """One fast DXGI query per process; no shell or vendor-specific utility."""
+    if os.name!='nt':return ''
+    factory=None;candidates=[]
+    try:
+        factory=_create_factory()
+        candidates=_hardware_candidates(factory.value)
+        return candidates[0][2] if candidates else ''
+    except (OSError,RuntimeError,AttributeError):
+        return ''  # MPV's own adapter selection remains a valid fallback.
+    finally:
+        for _,adapter,_ in candidates:adapter.release()
+        if factory is not None:factory.release()
+
+
 class D3D11Compositor:
     """Owned by one render thread, with two source textures and one output."""
-    def __init__(self,runtime,parent_hwnd=None,width=640,height=360):
+    def __init__(self,runtime,parent_hwnd=None,width=640,height=360,*,adapter_preference=None):
         if os.name!='nt':raise RuntimeError('GPU realtime rendering requires Windows D3D11')
+        if adapter_preference is not None and (not isinstance(adapter_preference,str) or not adapter_preference.strip()):
+            raise ValueError('GPU adapter preference must be a non-empty name or vendor')
+        self.adapter_preference=adapter_preference
         self.runtime=Path(runtime);self.parent=int(parent_hwnd or 0);self.window=0;self._closed=False
         self._wndproc=None;self._class_name=None
         for name in ('factory','adapter','device','context','swapchain','target','rtv','vertex','pixel','sampler','raster','constant'):
@@ -95,28 +149,30 @@ class D3D11Compositor:
         except Exception:self.close();raise
 
     def _device(self):
-        dxgi=C.WinDLL('dxgi.dll');create=dxgi.CreateDXGIFactory1
-        create.argtypes=[C.POINTER(GUID),C.POINTER(P)];create.restype=HR
-        iid=GUID('770aae78-f26f-4dba-a829-253c83d1b387')
-        check(create(C.byref(iid),C.byref(self.factory.value)),'CreateDXGIFactory1')
-        candidates=[]
-        for index in range(16):
-            pointer=P();result=call(self.factory.value,12,HR,[U,C.POINTER(P)],index,C.byref(pointer))
-            if result<0:break
-            adapter=Com(pointer);desc=AdapterDesc()
-            if call(pointer,10,HR,[C.POINTER(AdapterDesc)],C.byref(desc))>=0 and not desc.flags&2:
-                candidates.append((desc.vendor==0x10de,desc.dedicated,adapter,str(desc.description)))
-            else:adapter.release()
-        if not candidates:raise RuntimeError('No hardware D3D11 adapter is available')
-        candidates.sort(key=lambda x:(x[0],x[1]),reverse=True)
-        _,_,self.adapter,self.adapter_name=candidates[0]
-        for item in candidates[1:]:item[2].release()
+        self.factory=_create_factory()
+        candidates=_hardware_candidates(self.factory.value,self.adapter_preference)
+        if not candidates:raise RuntimeError('No matching hardware D3D11 adapter is available')
         create=C.WinDLL('d3d11.dll').D3D11CreateDevice
         create.argtypes=[P,U,P,U,C.POINTER(U),U,U,C.POINTER(P),C.POINTER(U),C.POINTER(P)]
         create.restype=HR
-        levels=(U*2)(0xb100,0xb000);level=U()
-        result=create(self.adapter.value,0,None,0x20|0x800,levels,2,7,C.byref(self.device.value),C.byref(level),C.byref(self.context.value))
-        check(result,'D3D11CreateDevice (hardware)')
+        last_error=None
+        for _,adapter,name in candidates:
+            self.adapter,self.adapter_name=adapter,name
+            levels=(U*2)(0xb100,0xb000);level=U()
+            result=create(adapter.value,0,None,0x20|0x800,levels,2,7,C.byref(self.device.value),C.byref(level),C.byref(self.context.value))
+            if result<0 and result&0xffffffff==0x80070057:
+                # Some older Intel/AMD D3D runtimes reject an unknown 11.1
+                # entry instead of selecting the supported 11.0 level.
+                self.context.release();self.device.release()
+                levels=(U*1)(0xb000)
+                result=create(adapter.value,0,None,0x20|0x800,levels,1,7,C.byref(self.device.value),C.byref(level),C.byref(self.context.value))
+            if result>=0:
+                for _,other,_ in candidates:
+                    if other is not adapter:other.release()
+                return
+            last_error=f'{name}: 0x{result&0xffffffff:08x}'
+            self.context.release();self.device.release();adapter.release()
+        raise RuntimeError('No usable hardware D3D11 adapter: '+str(last_error))
 
     def _window(self):
         user=C.WinDLL('user32',use_last_error=True);kernel=C.WinDLL('kernel32')

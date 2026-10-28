@@ -144,7 +144,7 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
         self.cut_time_var = tk.StringVar()
         self.cut_camera_var = tk.StringVar(value='1')
         self.bitrate_var = tk.StringVar(value='80M')
-        self.export_mode = tk.StringVar(value='RTX（沿用导出与 RTX 设置）')
+        self.export_mode = tk.StringVar(value='自动（沿用统一编码设置）')
         self.fps_var = tk.StringVar(value='30')
         self.output_var = tk.StringVar()
         self.program_var = tk.StringVar(value='成片监看 · 机位 —')
@@ -1943,10 +1943,11 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
                 self._creative_preview_folder = Path(tempfile.mkdtemp(prefix='okk_effect_preview_',dir=cache_dir('previews/effects')))
             self._creative_preview_sequence += 1
             output = self._creative_preview_folder / f'preview_{self._creative_preview_sequence:04d}.mp4'
-            gpu = 'h264_nvenc' in self.app.caps.nvenc_codecs
-            settings = ExportSettings(codec='h264_nvenc' if gpu else 'libx264',
-                preset='p2' if gpu else 'veryfast', quality=20, resolution='1080p',
-                bit_depth='8-bit', audio='none', decode_mode='cuda' if gpu else 'cpu', parallel_workers=1)
+            from hardware_encoders import preferred_codec
+            codec = preferred_codec(self.app.caps, 'h264')
+            settings = ExportSettings(codec=codec,
+                preset='p2', quality=20, resolution='1080p',
+                bit_depth='8-bit', audio='none', decode_mode='cuda' if codec.endswith('_nvenc') and self.app.caps.cuda_decode else 'cpu', parallel_workers=1)
         except Exception as exc:
             messagebox.showerror('效果预览', str(exc), parent=self); return
         self._comparison_requested=None
@@ -1984,7 +1985,8 @@ class MulticamWorkspace(StackPreviewUIMixin, VideoStackUIMixin, WorkspaceDocking
             if Path(output).suffix.lower() != suffix:
                 output = str(Path(output).with_suffix(suffix))
                 self.output_var.set(output)
-            if settings.codec.endswith('_nvenc') and settings.codec not in self.app.caps.nvenc_codecs:
+            from hardware_encoders import available_codecs
+            if settings.codec not in available_codecs(self.app.caps):
                 raise ValueError('当前编码器不可用；请等待 GPU 检测完成或选择 CPU 兼容模式。')
             if not self.app.caps.ffmpeg_path or not self.app.caps.ffprobe_path:
                 raise ValueError('未找到 FFmpeg / ffprobe。')

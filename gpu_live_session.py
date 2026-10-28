@@ -31,8 +31,9 @@ def runtime_directory(preferred=None):
 
 
 class GpuLiveSession:
-    def __init__(self,parent_hwnd,*,runtime=None,width=640,height=360,diagnostics=False):
+    def __init__(self,parent_hwnd,*,runtime=None,width=640,height=360,diagnostics=False,adapter_preference=None):
         self.parent=int(parent_hwnd or 0);self.runtime=runtime_directory(runtime)
+        self.adapter_preference=adapter_preference
         self.width,self.height=int(width),int(height);self.diagnostics=bool(diagnostics)
         self._lock=threading.Lock();self._ready=threading.Event();self._stop=threading.Event();self._wake=threading.Event()
         self._thread=None;self._error=None;self._closed=False;self._started=False;self._library=None
@@ -154,7 +155,8 @@ class GpuLiveSession:
     def _run(self):
         gfx=None;contexts=[]
         try:
-            gfx=D3D11Compositor(self.runtime,self.parent,self.width,self.height);self._gfx=gfx
+            options={'adapter_preference':self.adapter_preference} if self.adapter_preference is not None else {}
+            gfx=D3D11Compositor(self.runtime,self.parent,self.width,self.height,**options);self._gfx=gfx
             self._adapter=gfx.adapter_name;self._output_hwnd=int(gfx.window or 0)
             for core in self._cores.values():contexts.append(core.create_context(gfx.device.value.value,self._wake))
             self._contexts=contexts

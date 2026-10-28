@@ -40,6 +40,8 @@ from exporter_core import (
     read_gpu_sample,
     split_ranges,
 )
+from hardware_encoders import (CODEC_LABELS, available_codecs, codec_from_label,
+                               codec_label, encoder_vendor, preferred_codec)
 from editor_core import (
     AlignmentResult,
     JoinExportPlan,
@@ -93,7 +95,7 @@ from editor_core import build_proxy_encode_command, proxy_format_labels, resolve
 
 
 APP_NAME = "RTX 视频渲染工坊"
-APP_VERSION = "5.12.0"
+APP_VERSION = "5.12.1"
 BG = "#18191b"
 SURFACE = "#202124"
 PANEL = "#242629"
@@ -246,7 +248,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         self.split_var = tk.StringVar(value="驱动自动选择（检测中）")
         self.parallel_var = tk.IntVar(value=1)
         self.maxrate_var = tk.StringVar()
-        self.gpu_status_var = tk.StringVar(value="正在检测 NVIDIA GPU…")
+        self.gpu_status_var = tk.StringVar(value="正在检测显卡与可用编码器…")
         self.ffmpeg_status_var = tk.StringVar(value="正在检测 FFmpeg…")
         self.media_var = tk.StringVar(value="选择输入文件后显示媒体信息")
         self.progress_var = tk.DoubleVar(value=0)
@@ -256,9 +258,9 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         self.encode_metric_var = tk.StringVar(value="--%")
         self.decode_metric_var = tk.StringVar(value="--%")
         self.memory_metric_var = tk.StringVar(value="---- MB")
-        self.gpu_detail_var = tk.StringVar(value="等待 NVIDIA 检测")
-        self.encode_detail_var = tk.StringVar(value="NVENC 引擎")
-        self.decode_detail_var = tk.StringVar(value="NVDEC 引擎")
+        self.gpu_detail_var = tk.StringVar(value="等待显卡检测")
+        self.encode_detail_var = tk.StringVar(value="硬件编码引擎")
+        self.decode_detail_var = tk.StringVar(value="硬件解码")
         self.memory_detail_var = tk.StringVar(value="显存占用")
         self.gpu_meter_var = tk.DoubleVar(value=0)
         self.encode_meter_var = tk.DoubleVar(value=0)
@@ -275,12 +277,12 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         self.editor_seek_var = tk.StringVar(value="00:00:00.000")
         self.editor_trim_in_var = tk.StringVar(value="00:00:00.000")
         self.editor_trim_out_var = tk.StringVar(value="00:00:00.000")
-        self.editor_trim_mode_var = tk.StringVar(value="逐帧精准（RTX NVENC）")
+        self.editor_trim_mode_var = tk.StringVar(value="逐帧精准（沿用编码设置）")
         self.editor_trim_bitrate_var = tk.StringVar()
         self.editor_trim_output_var = tk.StringVar()
         self.editor_join_output_var = tk.StringVar()
-        self.editor_join_mode_var = tk.StringVar(value="RTX 重编码（沿用统一设置）")
-        self.editor_join_video_output_var = tk.StringVar(value="MOV / HEVC H.265（NVENC）")
+        self.editor_join_mode_var = tk.StringVar(value="重编码（沿用统一设置）")
+        self.editor_join_video_output_var = tk.StringVar(value="MOV / HEVC H.265（自动适配）")
         self.editor_join_gap_var = tk.StringVar(value="保留停机空窗（黑场，主音频连续）")
         self.editor_join_bitrate_var = tk.StringVar(value="80M")
         self.editor_join_leading_mode_var = tk.StringVar(
@@ -303,7 +305,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         )
         self.editor_join_timeline_zoom_slider_var = tk.DoubleVar(value=0.0)
         self.editor_join_timeline_zoom_text_var = tk.StringVar(value="适配全长")
-        self.editor_join_shared_settings_var = tk.StringVar(value="沿用“导出与 RTX”页设置")
+        self.editor_join_shared_settings_var = tk.StringVar(value="沿用“导出与 GPU”页设置")
         self.editor_split_mode_var = tk.StringVar(value="FLAC 无损（推荐）")
         self.editor_split_dir_var = tk.StringVar()
         self.editor_proxy_format_var = tk.StringVar(value=proxy_format_labels()[0])
@@ -422,7 +424,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
     def _on_page_changed(self, _event=None) -> None:
         selected = self.page_notebook.select()
         self.active_page = next((name for name, frame in self.page_frames.items() if str(frame) == selected), "multicam")
-        labels = {"basic": "转码与 RTX", "editor": "剪辑工具", "multicam": "多机位剪辑", "log": "任务日志"}
+        labels = {"basic": "转码与 GPU", "editor": "剪辑工具", "multicam": "多机位剪辑", "log": "任务日志"}
         self.page_title_var.set(labels[self.active_page])
         for name, button in self.page_buttons.items():
             button.configure(bg="#30363d" if name == self.active_page else SURFACE,
@@ -463,13 +465,13 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         """One compact page for output quality and RTX acceleration."""
         header = tk.Frame(parent, bg=PANEL)
         header.pack(fill="x", pady=(2, 12))
-        tk.Label(header, text="导出与 RTX", bg=PANEL, fg=TEXT, font=(UI_FONT, 16, "bold")).pack(side="left")
+        tk.Label(header, text="导出与 GPU", bg=PANEL, fg=TEXT, font=(UI_FONT, 16, "bold")).pack(side="left")
         self.advanced_title_label = tk.Label(
-            header, text="RTX 自动适配加速", bg=PANEL, fg=GREEN, font=(UI_FONT, 10, "bold"),
+            header, text="显卡自动适配加速", bg=PANEL, fg=GREEN, font=(UI_FONT, 10, "bold"),
         )
         self.advanced_title_label.pack(side="right", pady=(5, 0))
         self.basic_gpu_subtitle = tk.Label(
-            parent, text="正在识别 RTX 型号并生成硬件配置…", bg=PANEL, fg=MUTED,
+            parent, text="正在识别显卡并检测实际可用编码器…", bg=PANEL, fg=MUTED,
             font=(UI_FONT, 10), anchor="w",
         )
         self.basic_gpu_subtitle.pack(fill="x", pady=(0, 10))
@@ -489,7 +491,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
 
         self.codec_combo = combo_field(
             "编码格式", self.codec_var,
-            ["HEVC / H.265 (NVENC)", "AV1 (NVENC)", "H.264 (NVENC)"], 0, 0,
+            list(CODEC_LABELS.values()), 0, 0,
         )
         combo_field(
             "速度 / 画质", self.preset_var,
@@ -504,7 +506,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
             "音频", self.audio_var,
             ["AAC 320 kbps", "AAC 192 kbps", "复制原音频", "无音频"], 1, 0,
         )
-        combo_field(
+        self.decode_combo = combo_field(
             "解码路径", self.decode_var,
             ["NVIDIA CUDA（推荐）", "CPU 解码（兼容模式）"], 1, 1,
         )
@@ -554,7 +556,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         )
         self.basic_recommendation_label.pack(fill="x")
         self.advanced_note_label = tk.Label(
-            recommendation, text="正在读取 GPU 架构、NVENC 与 NVDEC 引擎数量…",
+            recommendation, text="正在检测显卡与可用编码器…",
             bg="#292d32", fg=MUTED, font=(UI_FONT, 9), anchor="w", justify="left",
             wraplength=1000,
         )
@@ -1798,10 +1800,10 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         tk.Label(panel, text="裁切模式", bg=PANEL_ALT, fg="#d7dbe1", font=(UI_FONT, 10, "bold")).pack(anchor="w", pady=(12, 6))
         ttk.Combobox(
             panel, textvariable=self.editor_trim_mode_var, state="readonly",
-            values=["逐帧精准（RTX NVENC）", "无损极速（按关键帧）"],
+            values=["逐帧精准（沿用编码设置）", "无损极速（按关键帧）"],
         ).pack(fill="x")
         tk.Label(
-            panel, text="精准模式沿用“导出与 RTX”页的编码、预设、位深和 CQ；填写下方码率后改为目标码率输出。",
+            panel, text="精准模式沿用“导出与 GPU”页的编码、预设、位深和 CQ；填写下方码率后改为目标码率输出。",
             bg=PANEL_ALT, fg=MUTED, font=(UI_FONT, 9), wraplength=410, justify="left",
         ).pack(anchor="w", pady=(7, 10))
         tk.Label(
@@ -1924,14 +1926,14 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         tk.Label(export_grid, text="视频封装 / 编码", bg=PANEL_ALT, fg="#d7dbe1", font=(UI_FONT, 9, "bold")).grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Combobox(
             export_grid, textvariable=self.editor_join_mode_var, state="readonly",
-            values=["无损复制视频流（最快）", "RTX 重编码（沿用统一设置）"],
+            values=["无损复制视频流（最快）", "重编码（沿用统一设置）"],
         ).grid(row=1, column=0, sticky="ew", pady=(4, 0))
         join_video_output_combo = ttk.Combobox(
             export_grid, textvariable=self.editor_join_video_output_var, state="readonly",
             values=[
-                "MOV / HEVC H.265（NVENC）", "MP4 / HEVC H.265（NVENC）",
-                "MOV / H.264（NVENC）", "MP4 / H.264（NVENC）",
-                "MKV / AV1（NVENC）", "MP4 / AV1（NVENC）",
+                "MOV / HEVC H.265（自动适配）", "MP4 / HEVC H.265（自动适配）",
+                "MOV / H.264（自动适配）", "MP4 / H.264（自动适配）",
+                "MKV / AV1（自动适配）", "MP4 / AV1（自动适配）",
             ],
         )
         join_video_output_combo.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
@@ -1950,7 +1952,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
             font=(UI_FONT, 8), anchor="w", justify="left", wraplength=405,
         ).pack(fill="x")
         tk.Label(
-            shared, text="编码、预设、位深、CQ、NVDEC、NVENC 分帧和并行数统一在“导出与 RTX”页设置。",
+            shared, text="编码、预设、位深、CQ、NVDEC、NVENC 分帧和并行数统一在“导出与 GPU”页设置。",
             bg="#21152c", fg=MUTED, font=(UI_FONT, 8), anchor="w", justify="left", wraplength=405,
         ).pack(fill="x", pady=(3, 0))
 
@@ -2134,12 +2136,12 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         specs = tk.Frame(panel, bg=PANEL, highlightthickness=1, highlightbackground=BORDER, padx=14, pady=10)
         specs.pack(fill="x", pady=(0, 10))
         self.proxy_specs_title_label = tk.Label(
-            specs, text="RTX 自动适配代理规格", bg=PANEL, fg=PINK, font=(UI_FONT, 10, "bold"),
+            specs, text="显卡自动适配代理规格", bg=PANEL, fg=PINK, font=(UI_FONT, 10, "bold"),
         )
         self.proxy_specs_title_label.pack(anchor="w")
         tk.Label(
             specs,
-            text="NVDEC 解码  →  CUDA 等比例缩放  →  H.264 NVENC\n"
+            text="按硬件检测选择 NVENC / AMF / QSV，或 CPU 编码\n"
                  "1080p · 原帧率/时长/时间码 · AAC 320k · CQ 19 · P2",
             bg=PANEL, fg=TEXT, font=(UI_FONT, 9), justify="left",
         ).pack(anchor="w", pady=(6, 0))
@@ -2202,7 +2204,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
     def _use_export_source_for_subtitles(self) -> None:
         path = self.input_var.get().strip()
         if not path or not Path(path).is_file():
-            messagebox.showerror(APP_NAME, "“导出与 RTX”页还没有选择有效素材。")
+            messagebox.showerror(APP_NAME, "“导出与 GPU”页还没有选择有效素材。")
             return
         self._set_subtitle_source(path)
 
@@ -2346,7 +2348,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
     def _use_export_source(self) -> None:
         path = self.input_var.get().strip()
         if not path or not Path(path).is_file():
-            messagebox.showerror(APP_NAME, "“导出与 RTX”页还没有选择有效视频。")
+            messagebox.showerror(APP_NAME, "“导出与 GPU”页还没有选择有效视频。")
             return
         self._load_editor_video(path)
 
@@ -2484,7 +2486,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
             self.editor_join_alignment_var.set("列表已变化，请重新自动对齐全部片段")
         if self.editor_join_files and not self.editor_join_output_var.get().strip():
             first = Path(self.editor_join_files[0])
-            suffix, _codec = self._join_video_output_profile()
+            suffix = self._join_output_suffix()
             self.editor_join_output_var.set(str(first.with_name(f"{first.stem}_拼接{suffix}")))
 
     def _refresh_join_list(self) -> None:
@@ -2668,7 +2670,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         self._refresh_join_list()
 
     def _choose_join_output(self) -> None:
-        suffix, _codec = self._join_video_output_profile()
+        suffix = self._join_output_suffix()
         first = Path(self.editor_join_files[0]) if self.editor_join_files else Path(f"拼接输出{suffix}")
         file_type = {".mov": "MOV", ".mp4": "MP4", ".mkv": "Matroska"}[suffix]
         path = filedialog.asksaveasfilename(
@@ -2687,19 +2689,22 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
             f"{self.decode_var.get()} · 并行 {self.parallel_var.get()} 路"
         )
 
+    def _join_output_suffix(self) -> str:
+        text = self.editor_join_video_output_var.get()
+        return ".mov" if text.startswith("MOV") else (".mkv" if text.startswith("MKV") else ".mp4")
+
     def _join_video_output_profile(self) -> tuple[str, str]:
         text = self.editor_join_video_output_var.get()
-        suffix = ".mov" if text.startswith("MOV") else (".mkv" if text.startswith("MKV") else ".mp4")
-        if "H.264" in text:
-            codec = "h264_nvenc"
-        elif "AV1" in text:
-            codec = "av1_nvenc"
-        else:
-            codec = "hevc_nvenc"
+        suffix = self._join_output_suffix()
+        family = "h264" if "H.264" in text else "av1" if "AV1" in text else "hevc"
+        codec = preferred_codec(self.caps, family)
+        actual_family = 'h264' if codec == 'libx264' else 'hevc' if codec == 'libx265' else codec.split('_',1)[0]
+        if actual_family != family:
+            raise ValueError(f'本机未检测到可用的 {family.upper()} 编码器，请在视频封装 / 编码中选择其他格式。')
         return suffix, codec
 
     def _sync_join_output_format(self, _event=None) -> None:
-        suffix, _codec = self._join_video_output_profile()
+        suffix = self._join_output_suffix()
         current = self.editor_join_output_var.get().strip()
         if current:
             self.editor_join_output_var.set(str(Path(current).with_suffix(suffix)))
@@ -2909,7 +2914,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
             settings.resolution = "original"
             settings.audio = "aac"
             settings.audio_bitrate = "320k"
-            settings.decode_mode = "cuda" if self.caps.cuda_decode else "cpu"
+            settings.decode_mode = "cuda" if settings.codec.endswith('_nvenc') and self.caps.cuda_decode else "cpu"
             settings.split_encode = "auto"
             try:
                 settings.video_bitrate = normalize_video_bitrate(self.editor_trim_bitrate_var.get())
@@ -3264,7 +3269,8 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         if self.working:
             return
         paths = list(self.editor_join_files)
-        output_suffix, join_video_codec = self._join_video_output_profile()
+        output_suffix = self._join_output_suffix()
+        join_video_codec = None
         output = self.editor_join_output_var.get().strip()
         if output and Path(output).suffix.lower() != output_suffix:
             output = str(Path(output).with_suffix(output_suffix))
@@ -3295,6 +3301,12 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
             return
         join_mode_text = self.editor_join_mode_var.get()
         lossless = join_mode_text.startswith("无损")
+        if not lossless:
+            try:
+                _output_suffix, join_video_codec = self._join_video_output_profile()
+            except ValueError as exc:
+                messagebox.showerror(APP_NAME, str(exc))
+                return
         preserve_gap = self.editor_join_gap_var.get().startswith("保留")
         leading_mode_text = self.editor_join_leading_mode_var.get()
         trim_before_audio = leading_mode_text.startswith("裁掉")
@@ -3314,13 +3326,13 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         if preserve_gap and lossless:
             messagebox.showerror(
                 APP_NAME,
-                "黑场属于新增视频帧，不能用纯无损复制生成。请将画面处理改为“RTX 重编码”。",
+                "黑场属于新增视频帧，不能用纯无损复制生成。请将画面处理改为“重编码”。",
             )
             return
         if lossless and (trim_after_audio or custom_start is not None or custom_end is not None):
             messagebox.showerror(
                 APP_NAME,
-                "按主音频结尾或手动成片范围裁切需要逐帧处理。请将画面处理改为“RTX 重编码”。",
+                "按主音频结尾或手动成片范围裁切需要逐帧处理。请将画面处理改为“重编码”。",
             )
             return
         audio_format_text = self.editor_join_audio_format_var.get()
@@ -3349,10 +3361,10 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         if not lossless:
             encode_settings = self._settings()
             encode_settings.codec = join_video_codec
-            if encode_settings.codec not in self.caps.nvenc_codecs:
+            if encode_settings.codec not in available_codecs(self.caps):
                 messagebox.showerror(
                     APP_NAME,
-                    f"当前 FFmpeg 不支持 {encode_settings.codec}。请在“视频封装 / 编码”中选择可用的 NVENC 编码器。",
+                    f"当前显卡、驱动或 FFmpeg 无法使用 {encode_settings.codec}。请选择已检测可用的编码器。",
                 )
                 return
             if encode_settings.decode_mode == "cuda" and not self.caps.cuda_decode:
@@ -3371,7 +3383,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         Path(output).parent.mkdir(parents=True, exist_ok=True)
         self.cancel_event.clear()
         self._set_working(True)
-        action = "无损紧凑拼接" if lossless else ("RTX 黑场连续拼接" if preserve_gap else "RTX 紧凑拼接")
+        action = "无损紧凑拼接" if lossless else ("硬件黑场连续拼接" if preserve_gap else "硬件紧凑拼接")
         if audio:
             action += "并替换主音频"
         self._begin_shared_progress(f"{action}：准备素材…")
@@ -3426,7 +3438,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
                     if lossless and needs_leading_trim and trim_before_audio:
                         raise RuntimeError(
                             "裁掉主音频开始前的画面需要逐帧处理，不能使用无损视频流复制。"
-                            "请将画面处理改为“RTX 重编码”。"
+                            "请将画面处理改为“重编码”。"
                         )
                 if self.cancel_event.is_set():
                     self.events.put(("cancelled", None))
@@ -3552,7 +3564,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
                             route = (
                                 "CUDA 显存拼接 → 单路 NVENC 直接导出"
                                 if join_uses_cuda_frames(encode_settings, media[0], self.caps)
-                                else "内存兼容拼接 → 单路 NVENC 直接导出"
+                                else "内存兼容拼接 → 所选编码器直接导出"
                             )
                             self.events.put((
                                 "log",
@@ -3991,7 +4003,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         self.page_buttons = {}
         holder = tk.Frame(nav, bg=SURFACE)
         holder.pack()
-        for name, label in (("basic", "转码与 RTX"), ("editor", "剪辑工具"),
+        for name, label in (("basic", "转码与 GPU"), ("editor", "剪辑工具"),
                             ("multicam", "多机位剪辑"), ("log", "任务日志")):
             button = tk.Button(holder, text=label, command=lambda key=name: self._select_page(key),
                                bg=SURFACE, fg=MUTED, activebackground=PANEL_ALT, activeforeground=TEXT,
@@ -4052,10 +4064,10 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
     def _build_basic(self, parent: ttk.Frame) -> None:
         ttk.Label(parent, text="渲染设置", style="Section.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 7))
         self.basic_gpu_subtitle = ttk.Label(
-            parent, text="正在识别 RTX 型号并生成硬件配置…", style="Muted.TLabel", font=(UI_FONT, 11),
+            parent, text="正在识别显卡并检测实际可用编码器…", style="Muted.TLabel", font=(UI_FONT, 11),
         )
         self.basic_gpu_subtitle.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
-        self.codec_combo = self._combo(parent, "编码格式", self.codec_var, ["HEVC / H.265 (NVENC)", "AV1 (NVENC)", "H.264 (NVENC)"], 2, 0, "thumb_02_cat.png")
+        self.codec_combo = self._combo(parent, "编码格式", self.codec_var, list(CODEC_LABELS.values()), 2, 0, "thumb_02_cat.png")
         self._combo(parent, "速度 / 画质预设", self.preset_var, ["最快 P1", "极速 P2", "均衡 P4", "高质量 P6", "最高质量 P7"], 2, 1, "thumb_03_blonde.png")
         self._combo(parent, "输出分辨率", self.resolution_var, ["保持原分辨率", "1080p", "1440p", "4K", "8K"], 3, 0, "thumb_05_feathers.png")
         self._combo(parent, "输出位深", self.depth_var, ["自动", "8-bit", "10-bit"], 3, 1, "thumb_07_ice.png")
@@ -4086,10 +4098,10 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
             parent.rowconfigure(row, weight=1, uniform="export_settings")
 
     def _build_advanced(self, parent: ttk.Frame) -> None:
-        self.advanced_title_label = ttk.Label(parent, text="RTX 自动适配加速", style="Section.TLabel")
+        self.advanced_title_label = ttk.Label(parent, text="显卡自动适配加速", style="Section.TLabel")
         self.advanced_title_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 7))
-        ttk.Label(parent, text="控制 NVDEC、NVENC 分帧与并行吞吐", style="Muted.TLabel", font=(UI_FONT, 11)).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
-        self._combo(parent, "解码路径", self.decode_var, ["NVIDIA CUDA（推荐）", "CPU 解码（兼容模式）"], 2, 0, "thumb_09_silver_portrait.png")
+        ttk.Label(parent, text="硬件编码、兼容解码与并行设置", style="Muted.TLabel", font=(UI_FONT, 11)).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        self.decode_combo = self._combo(parent, "解码路径", self.decode_var, ["NVIDIA CUDA（推荐）", "CPU 解码（兼容模式）"], 2, 0, "thumb_09_silver_portrait.png")
         self.split_combo = self._combo(
             parent, "多 NVENC 分帧", self.split_var, ["驱动自动选择（检测中）", "关闭"], 2, 1, "thumb_10_chin.png",
         )
@@ -4121,7 +4133,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
             font=(UI_FONT, 12),
         ).pack(fill="x", pady=(13, 0), ipady=11)
 
-        note = "正在读取 GPU 架构、NVENC 代际与编码引擎数量…"
+        note = "正在检测硬件编码能力…"
         note_panel = tk.Frame(parent, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER, padx=24, pady=20)
         note_panel.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(16, 0))
         self._add_glass_shine(note_panel)
@@ -4167,6 +4179,45 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
 
     def _apply_gpu_profile(self) -> None:
         profile = self.caps.gpu_profile
+        allowed = available_codecs(self.caps)
+        codec_values = [label for codec, label in CODEC_LABELS.items() if codec in allowed]
+        self.codec_combo.configure(values=codec_values)
+        if self.codec_var.get() not in codec_values and codec_values:
+            self.codec_var.set(codec_label(preferred_codec(self.caps)))
+        if '_vendor_codec_trace' not in vars(self):
+            self._vendor_codec_trace = self.codec_var.trace_add('write', self._configure_encoder_controls)
+        self._configure_encoder_controls()
+        try:
+            selected_vendor = encoder_vendor(codec_from_label(self.codec_var.get()))
+        except ValueError:
+            selected_vendor = 'unknown'
+        if selected_vendor != 'nvidia':
+            backend = {'amd': 'AMD AMF', 'intel': 'Intel QSV', 'cpu': 'CPU 软件编码'}.get(selected_vendor, '无可用编码器')
+            name = self._encoder_gpu_name(selected_vendor)
+            if name in {'NVIDIA GPU not detected', 'GPU not detected', ''}:
+                name = '未检测到可用硬件编码设备'
+            self.gpu_status_var.set(f'{name}  |  {backend} · 按驱动检测结果适配')
+            self.gpu_detail_var.set(name[:30])
+            self.encode_detail_var.set(backend)
+            self.decode_detail_var.set('D3D11 硬件监看 / 兼容解码导出')
+            if self.caps.gpu_memory_mb:
+                self.memory_detail_var.set(f'总显存 {self.caps.gpu_memory_mb / 1024:.1f} GB')
+            for control_name in ('split_combo', 'editor_join_split_combo'):
+                control = vars(self).get(control_name)
+                if control is not None:
+                    control.configure(values=['关闭'], state='disabled')
+            self.split_var.set('关闭')
+            proxy_values = ['同时 1 路（推荐）', '同时 2 路', '同时 3 路']
+            self.proxy_parallel_combo.configure(values=proxy_values)
+            self.editor_proxy_parallel_var.set(proxy_values[0])
+            self.parallel_var.set(1)
+            self.basic_gpu_subtitle.configure(text=f'已适配 {backend}；仅显示已检测可用的编码器')
+            self.advanced_title_label.configure(text='跨显卡编码设置')
+            self.proxy_specs_title_label.configure(text=f'{backend} 代理规格')
+            self.basic_recommendation_label.configure(text='默认单任务。硬件编码不支持当前输入时可选择 CPU 编码；10-bit 取决于实际检测能力。')
+            self.advanced_note_label.configure(text='AMD 使用 AMF，Intel 使用 QSV，软件回退使用 x264 / x265。\n\n导出通过兼容解码提供画面，监看可用 D3D11 硬件解码。CUDA、NVENC 多引擎分帧及其专属选项仅适用于 NVIDIA。')
+            self._update_join_shared_settings_summary()
+            return
         generation = f"第 {profile.nvenc_generation} 代" if profile.nvenc_generation else "未知代际"
         memory = f" · {self.caps.gpu_memory_mb / 1024:.1f} GB" if self.caps.gpu_memory_mb else ""
         support = "已自动适配" if profile.in_supported_range else "兼容模式"
@@ -4181,21 +4232,6 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         self.decode_detail_var.set(f"{profile.architecture} · NVDEC ×{profile.nvdec_engines}")
         if self.caps.gpu_memory_mb:
             self.memory_detail_var.set(f"总显存 {self.caps.gpu_memory_mb / 1024:.1f} GB")
-
-        codec_labels = {
-            "hevc_nvenc": "HEVC / H.265 (NVENC)",
-            "av1_nvenc": "AV1 (NVENC)",
-            "h264_nvenc": "H.264 (NVENC)",
-        }
-        codec_values = [
-            codec_labels[codec]
-            for codec in ("hevc_nvenc", "av1_nvenc", "h264_nvenc")
-            if codec in self.caps.nvenc_codecs
-        ]
-        if codec_values:
-            self.codec_combo.configure(values=codec_values)
-            if self.codec_var.get() not in codec_values:
-                self.codec_var.set(codec_values[0])
 
         split_capable = bool(self.caps.split_encode & {"hevc_nvenc", "av1_nvenc"})
         if profile.nvenc_engines > 1 and split_capable:
@@ -4249,6 +4285,51 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
                 "请优先观察软件里的“视频编码”和实际导出倍速。"
             )
         )
+        self._configure_encoder_controls()
+
+    def _encoder_gpu_name(self, vendor):
+        needles = {'nvidia': ('NVIDIA','GEFORCE','RTX','QUADRO'),
+                   'amd': ('AMD','RADEON','ATI '), 'intel': ('INTEL',)}.get(vendor, ())
+        names = getattr(self.caps, 'gpu_names', ()) or (self.caps.gpu_name,)
+        return next((name for name in names if any(token in name.upper() for token in needles)),
+                    {'nvidia':'NVIDIA GPU','amd':'AMD GPU','intel':'Intel GPU','cpu':'CPU 软件编码'}.get(vendor,'未检测到可用硬件编码设备'))
+
+    def _configure_encoder_controls(self, *_):
+        """Keep vendor-specific options out of other encoders' UI settings."""
+        try:
+            codec = codec_from_label(self.codec_var.get())
+        except ValueError:
+            return
+        nvenc = codec.endswith('_nvenc')
+        vendor = encoder_vendor(codec)
+        backend = {'nvidia':'NVIDIA NVENC','amd':'AMD AMF','intel':'Intel QSV','cpu':'CPU 软件编码'}.get(vendor,codec)
+        self._selected_encoder_vendor = vendor
+        self.encode_detail_var.set(backend)
+        self.gpu_detail_var.set(self._encoder_gpu_name(vendor)[:30])
+        self.gpu_status_var.set(f'{self._encoder_gpu_name(vendor)}  |  {backend} · 按实际检测能力适配')
+        if vendor in {'amd','intel','cpu'}:
+            self.advanced_title_label.configure(text=f'{backend} 编码设置')
+            self.basic_recommendation_label.configure(text=f'当前选择 {backend}。默认单任务；画质与位深依实际编码器能力设置。')
+            for variable in (self.gpu_metric_var,self.encode_metric_var,self.decode_metric_var,self.memory_metric_var):
+                variable.set('--')
+            for variable in (self.gpu_meter_var,self.encode_meter_var,self.decode_meter_var,self.memory_meter_var):
+                variable.set(0)
+            self.monitor_var.set(f'{backend} · 当前不提供此设备的利用率遥测，请参考导出 FPS 和系统任务管理器。')
+        decode_values = ['CPU 解码（兼容模式）']
+        if nvenc and self.caps.cuda_decode:
+            decode_values.insert(0, 'NVIDIA CUDA（推荐）')
+        control = vars(self).get('decode_combo')
+        if control is not None:
+            control.configure(values=decode_values, state='readonly' if nvenc else 'disabled')
+        if not nvenc or not self.caps.cuda_decode:
+            if self.decode_var.get().startswith('NVIDIA'):
+                self.decode_var.set('CPU 解码（兼容模式）')
+        split_supported = bool(nvenc and codec in self.caps.split_encode and
+            self.caps.gpu_profile.nvenc_engines > 1)
+        for name in ('split_combo', 'editor_join_split_combo'):
+            control = vars(self).get(name)
+            if control is not None:
+                control.configure(state='readonly' if split_supported else 'disabled')
 
     def _choose_input(self) -> None:
         path = filedialog.askopenfilename(title="选择输入视频", filetypes=[
@@ -4262,7 +4343,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
     def _set_input_video(self, path: str) -> None:
         self.input_var.set(path)
         source = Path(path)
-        self.output_var.set(str(source.with_name(f"{source.stem}_RTX_HEVC.mp4")))
+        self.output_var.set(str(source.with_name(f"{source.stem}_OKK_HEVC.mp4")))
         self.media_var.set("正在读取媒体信息…")
 
         def worker() -> None:
@@ -4279,7 +4360,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         source = Path(self.input_var.get() or "output.mp4")
         path = filedialog.asksaveasfilename(
             title="选择输出文件",
-            initialfile=f"{source.stem}_RTX_HEVC.mp4",
+            initialfile=f"{source.stem}_OKK_HEVC.mp4",
             defaultextension=".mp4",
             filetypes=[("MP4", "*.mp4"), ("Matroska", "*.mkv"), ("MOV", "*.mov")],
         )
@@ -4287,11 +4368,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
             self.output_var.set(path)
 
     def _settings(self) -> ExportSettings:
-        codec = {
-            "HEVC / H.265 (NVENC)": "hevc_nvenc",
-            "AV1 (NVENC)": "av1_nvenc",
-            "H.264 (NVENC)": "h264_nvenc",
-        }[self.codec_var.get()]
+        codec = codec_from_label(self.codec_var.get())
         preset = self.preset_var.get().split()[-1].lower()
         resolution = {
             "保持原分辨率": "original", "1080p": "1080p", "1440p": "1440p", "4K": "4k", "8K": "8k",
@@ -4317,13 +4394,14 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
             codec=codec,
             quality=self.quality_var.get(),
             preset=preset,
-            multipass="disabled" if preset in {"p1", "p2"} else ("qres" if preset == "p4" else "fullres"),
-            split_encode=split,
+            multipass=("disabled" if preset in {"p1", "p2"} or not codec.endswith('_nvenc')
+                       else "qres" if preset == "p4" else "fullres"),
+            split_encode=split if codec.endswith('_nvenc') else 'disabled',
             resolution=resolution,
             bit_depth=self.depth_var.get().replace("自动", "auto"),
             audio=audio,
             audio_bitrate=bitrate,
-            decode_mode="cuda" if self.decode_var.get().startswith("NVIDIA") else "cpu",
+            decode_mode="cuda" if codec.endswith('_nvenc') and self.decode_var.get().startswith("NVIDIA") else "cpu",
             maxrate=self.maxrate_var.get().strip(),
         )
 
@@ -4342,9 +4420,21 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
         if not self.caps.ffmpeg_path or not self.caps.ffprobe_path:
             messagebox.showerror(APP_NAME, "未找到 FFmpeg/ffprobe。请把 ffmpeg.exe 和 ffprobe.exe 放入软件的 bin 文件夹。")
             return None
-        settings = self._settings()
-        if settings.codec not in self.caps.nvenc_codecs:
-            messagebox.showerror(APP_NAME, f"当前 FFmpeg 不支持 {settings.codec}。请换用包含 NVENC 的新版 FFmpeg。")
+        try:
+            settings = self._settings()
+        except ValueError as error:
+            messagebox.showerror(APP_NAME, str(error))
+            return None
+        if settings.codec not in available_codecs(self.caps):
+            messagebox.showerror(APP_NAME, f"当前显卡、驱动或 FFmpeg 无法使用 {settings.codec}。请从编码格式中选择已检测可用的编码器。")
+            return None
+        if settings.codec.startswith('h264_') and settings.bit_depth == '10-bit':
+            messagebox.showerror(APP_NAME, 'H.264 硬件编码仅支持 8-bit；10-bit 请改用可用的 HEVC / AV1 或 CPU 编码。')
+            return None
+        if (getattr(self.caps, 'hardware_probe_complete', False)
+                and settings.codec in self.caps.hardware_codecs and settings.bit_depth == '10-bit'
+                and settings.codec not in self.caps.ten_bit_codecs):
+            messagebox.showerror(APP_NAME, '当前显卡或驱动未通过此编码器的 10-bit 检测，请选择 8-bit 或其他编码器。')
             return None
         try:
             media = self.media if self.media and self.media.path == source else probe_media(self.caps.ffprobe_path, source)
@@ -4638,6 +4728,9 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
     def _poll_gpu(self) -> None:
         if not self.working:
             return
+        if vars(self).get('_selected_encoder_vendor','nvidia') != 'nvidia':
+            self.after(1000, self._poll_gpu)
+            return
         def worker() -> None:
             sample = read_gpu_sample(gpu_index=0)
             self.events.put(("gpu_sample", sample))
@@ -4654,7 +4747,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
                     self.caps = payload  # type: ignore[assignment]
                     if self.media_pool_workspace is not None:
                         self.media_pool_workspace.on_capabilities()
-                    codecs = ", ".join(sorted(self.caps.nvenc_codecs)) or "无 NVENC"
+                    codecs = ", ".join(sorted(available_codecs(self.caps))) or "无可用编码器"
                     self.ffmpeg_status_var.set(f"{Path(self.caps.ffmpeg_path).name if self.caps.ffmpeg_path else '未找到'}  |  {codecs}")
                     self._apply_gpu_profile()
                     ffmpeg_name = Path(self.caps.ffmpeg_path).name if self.caps.ffmpeg_path else "未找到 FFmpeg"
@@ -4667,7 +4760,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
                         f"NVDEC ×{profile.nvdec_engines}; support: "
                         f"{'native' if profile.in_supported_range else 'compatibility'}"
                     )
-                    self._log(f"NVENC: {codecs}; CUDA decode: {self.caps.cuda_decode}; scale_cuda: {self.caps.scale_cuda}; split encode: {sorted(self.caps.split_encode)}")
+                    self._log(f"可用编码器: {codecs}; CUDA decode: {self.caps.cuda_decode}; scale_cuda: {self.caps.scale_cuda}; split encode: {sorted(self.caps.split_encode)}")
                     self._request_join_timeline_probe()
                 elif kind == "media":
                     self.media = payload  # type: ignore[assignment]
@@ -4721,7 +4814,7 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
                     )
                     hwdec = str(playback_backend.get("hwdec") or "GPU").upper()
                     interop = str(playback_backend.get("interop") or "GPU DIRECT")
-                    self.mpv_status_label.configure(text=f"●  RTX {hwdec} / GPU 渲染", fg=GREEN)
+                    self.mpv_status_label.configure(text=f"●  GPU {hwdec} / 硬件渲染", fg=GREEN)
                     self._log(
                         f"剪辑工具已载入：{info.path}; 监看后端：{hwdec}; "
                         f"interop: {interop}; renderer: {playback_backend.get('renderer')}"
@@ -4965,6 +5058,8 @@ class ExporterApp(StudioIntegrationMixin, tk.Tk):
                         f"封装音频 {percent:4.1f}% · {parse_fps_value(str(fps)):.1f} FPS · {speed}"
                     )
                 elif kind == "gpu_sample":
+                    if vars(self).get('_selected_encoder_vendor','nvidia') != 'nvidia':
+                        continue
                     sample = payload  # type: ignore[assignment]
                     if sample:
                         gpu_value = float(sample.get("utilization.gpu", "0") or 0)

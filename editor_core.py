@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from effects_core import EffectSettings, build_effect_filter_graph, overlay_active, validate_effects
+from hardware_encoders import available_codecs, preferred_codec
 
 from exporter_core import (
     CREATE_NO_WINDOW,
@@ -566,7 +567,7 @@ def build_concat_encode_command(
         ffmpeg, "-hide_banner", "-y", "-loglevel", "warning",
         "-stats_period", "0.25", "-progress", "pipe:1", "-nostats",
     ]
-    if settings.decode_mode == "cuda":
+    if settings.decode_mode == "cuda" and settings.codec.endswith("_nvenc"):
         command += [
             "-hwaccel", "cuda", "-hwaccel_device", str(settings.gpu_index),
             "-hwaccel_output_format", "cuda",
@@ -856,7 +857,7 @@ def partition_join_video_spans(
 
 def join_uses_cuda_frames(settings: ExportSettings, reference: MediaInfo, caps: Capabilities) -> bool:
     """Use a shared CUDA context throughout the video graph when supported."""
-    if settings.decode_mode != "cuda":
+    if settings.decode_mode != "cuda" or not settings.codec.endswith("_nvenc"):
         return False
     height = _resolution_height(settings.resolution)
     needs_conversion = (
@@ -960,7 +961,7 @@ def _build_join_video_inputs(
                 "-ss", f"{span.source_start:.6f}",
                 "-t", f"{span.duration + 1.0 / fps:.6f}",
             ]
-            if settings.decode_mode == "cuda":
+            if settings.decode_mode == "cuda" and settings.codec.endswith("_nvenc"):
                 command += [
                     "-hwaccel", "cuda",
                     "-hwaccel_device", "okk" if cuda_frames else str(settings.gpu_index),
@@ -1193,7 +1194,7 @@ def build_gap_preserving_concat_encode_command(
             # Input seeking still decodes the preceding GOP for an accurate
             # first frame, but skips the hours of footage outside this slice.
             command += ["-ss", f"{span.source_start:.6f}", "-t", f"{span.duration + 1.0 / fps:.6f}"]
-            if settings.decode_mode == "cuda":
+            if settings.decode_mode == "cuda" and settings.codec.endswith("_nvenc"):
                 command += ["-hwaccel", "cuda", "-hwaccel_device", "okk" if cuda_frames else str(settings.gpu_index)]
                 if cuda_frames:
                     command += ["-hwaccel_output_format", "cuda"]
@@ -1481,6 +1482,18 @@ def build_proxy_encode_command(
         caps.cuda_decode if cuda_available is None else cuda_available,
         fmt,
     )
+    if fmt.uses_nvenc:
+        # The interoperable H.264 proxy format is independent of GPU vendor.
+        # Preserve legacy NVENC settings for integrations without a probe;
+        # detected machines choose a codec the driver actually initialized.
+        settings.codec = preferred_codec(caps, family='h264')
+        if settings.codec not in {'h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264'}:
+            if 'libx264' not in available_codecs(caps):
+                raise ValueError('当前设备没有可用的 H.264 代理编码器。')
+            settings.codec = 'libx264'
+        if not settings.codec.endswith('_nvenc'):
+            settings.decode_mode = 'cpu'
+            settings.split_encode = 'disabled'
     return build_encode_command(
         ffmpeg, input_path, output_path, settings, media, caps,
     )

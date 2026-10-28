@@ -9,6 +9,8 @@ from tkinter import filedialog, ttk
 from editor_core import (format_time, normalize_audio_bitrate,
                          normalize_audio_sample_rate, normalize_video_bitrate)
 from exporter_core import ExportSettings
+from hardware_encoders import (CODEC_LABELS, available_codecs, codec_from_label,
+                               codec_label, encoder_vendor)
 
 PANEL = '#292b2e'
 INPUT = '#18191b'
@@ -22,7 +24,8 @@ AUDIO_FORMATS = {
     'PCM 16-bit': 'pcm_s16le', 'PCM 24-bit': 'pcm_s24le',
     'PCM 32-bit': 'pcm_s32le', 'PCM Float32': 'pcm_f32le', 'FLAC': 'flac',
 }
-CODECS = ['HEVC / H.265 (NVENC)', 'H.264 (NVENC)', 'AV1 (NVENC)']
+CODECS = list(dict.fromkeys(['HEVC / H.265 (NVENC)', 'H.264 (NVENC)', 'AV1 (NVENC)',
+                            *CODEC_LABELS.values()]))
 PRESETS = ['最快 P1', '极速 P2', '均衡 P4', '高质量 P6', '最高质量 P7']
 CPU_PRESETS = {'p1': 'ultrafast', 'p2': 'veryfast', 'p4': 'medium',
                'p6': 'slow', 'p7': 'slower'}
@@ -141,28 +144,35 @@ def make_delivery_settings(workspace):
     # A standalone workspace has no ExporterApp._settings method. Keep the same
     # mapping there so tests and integrations still use the visible controls.
     if not callable(factory) and not callable(method):
-        settings.codec = dict(zip(CODECS, ['hevc_nvenc', 'h264_nvenc', 'av1_nvenc']))[app.codec_var.get()]
+        settings.codec = codec_from_label(app.codec_var.get())
         settings.preset = app.preset_var.get().split()[-1].lower()
         settings.resolution = {'保持原分辨率': 'original', '1080p': '1080p',
                                '1440p': '1440p', '4K': '4k', '8K': '8k'}[app.resolution_var.get()]
         settings.bit_depth = app.depth_var.get().replace('自动', 'auto')
-        settings.decode_mode = 'cuda' if app.decode_var.get().startswith('NVIDIA') else 'cpu'
+        settings.decode_mode = 'cuda' if (settings.codec.endswith('_nvenc') and
+            app.decode_var.get().startswith('NVIDIA')) else 'cpu'
         split_text = app.split_var.get()
         match = re.search(r'强制\s*(\d+)\s*路', split_text)
         settings.split_encode = match.group(1) if match else (
             'disabled' if split_text.startswith('单路') or split_text == '关闭' else 'auto')
+    if ws.export_mode.get().startswith('CPU'):
+        settings.codec = 'libx264'
+        settings.decode_mode = 'cpu'
+        settings.preset = CPU_PRESETS.get(settings.preset, settings.preset)
     settings.quality = quality
     settings.video_bitrate = _bitrate(ws.bitrate_var, '目标码率', optional=True)
     settings.maxrate = _bitrate(app.maxrate_var, '最大码率', optional=True)
     settings.gop = _integer(ws.delivery_gop_var, '关键帧间隔', 1, 10000)
-    settings.bframes = _integer(ws.delivery_bframes_var, 'B 帧', 0, 4)
-    settings.gpu_index = _integer(ws.delivery_gpuindex_var, 'GPU 索引', 0, 31)
+    settings.bframes = (0 if encoder_vendor(settings.codec) == 'amd' else
+                       _integer(ws.delivery_bframes_var, 'B 帧', 0, 4))
+    settings.gpu_index = (_integer(ws.delivery_gpuindex_var, 'GPU 索引', 0, 31)
+                          if settings.codec.endswith('_nvenc') else 0)
     settings.parallel_workers = _integer(app.parallel_var, '并行任务数', 1, 4)
     settings.auto_parallel = bool(ws.delivery_auto_parallel_var.get())
-    settings.tune = ws.delivery_tune_var.get()
-    if settings.tune not in {'hq', 'll', 'ull', 'lossless'}:
+    settings.tune = ws.delivery_tune_var.get() if settings.codec.endswith('_nvenc') else 'hq'
+    if settings.codec.endswith('_nvenc') and settings.tune not in {'hq', 'll', 'ull', 'lossless'}:
         raise ValueError('请选择有效的 NVENC 调优方式。')
-    multipass = ws.delivery_multipass_var.get()
+    multipass = ws.delivery_multipass_var.get() if settings.codec.endswith('_nvenc') else 'disabled'
     if multipass == '自动（随预设）':
         settings.multipass = 'disabled' if settings.preset in {'p1', 'p2'} else (
             'qres' if settings.preset == 'p4' else 'fullres')
@@ -170,12 +180,19 @@ def make_delivery_settings(workspace):
         settings.multipass = multipass
     else:
         raise ValueError('请选择有效的多重分析模式。')
-    if ws.export_mode.get().startswith('CPU'):
-        settings.codec = 'libx264'
+    if settings.codec.startswith('h264_') and settings.bit_depth == '10-bit':
+        raise ValueError('H.264 硬件编码仅支持 8-bit；10-bit 请使用可用的 HEVC / AV1 或 CPU H.264。')
+    caps = vars(app).get('caps')
+    if (caps is not None and getattr(caps, 'hardware_probe_complete', False)
+            and settings.codec in getattr(caps, 'hardware_codecs', set())
+            and settings.bit_depth == '10-bit'
+            and settings.codec not in getattr(caps, 'ten_bit_codecs', set())):
+        raise ValueError('当前显卡或驱动未通过此编码器的 10-bit 检测，请改用 8-bit 或其他编码器。')
+    if not settings.codec.endswith('_nvenc'):
         settings.decode_mode = 'cpu'
-        settings.preset = CPU_PRESETS.get(settings.preset, settings.preset)
-    elif settings.codec == 'h264_nvenc' and settings.bit_depth == '10-bit':
-        raise ValueError('H.264 NVENC 仅支持 8-bit；10-bit 请使用 HEVC / AV1 或 CPU H.264。')
+        settings.split_encode = 'disabled'
+        settings.multipass = 'disabled'
+        settings.gpu_index = 0
     if settings.decode_mode!='cuda' or not settings.codec.endswith('_nvenc'):settings.auto_parallel=False
     suffix = CONTAINERS.get(ws.delivery_container_var.get())
     if suffix is None:
@@ -299,7 +316,7 @@ def build_delivery_panel(workspace, delivery_frame):
     video = scroll_page('视频')
     section(video, '编码与质量')
     field(video, '编码设备', ws.export_mode,
-          ['RTX NVENC（GPU 编码）', 'CPU H.264（兼容模式）'])
+          ['自动（沿用统一编码设置）', 'CPU H.264（兼容模式）'])
     field(video, '视频编码', app.codec_var, CODECS, key='codec')
     field(video, '速度 / 画质预设', app.preset_var, PRESETS)
     field(video, '输出分辨率', app.resolution_var, ['保持原分辨率', '1080p', '1440p', '4K', '8K'])
@@ -321,11 +338,11 @@ def build_delivery_panel(workspace, delivery_frame):
           ['保留原采样率', '44100', '48000', '88200', '96000', '192000'], editable=True, key='audio_rate')
     audio_note = note(audio)
 
-    rtx = scroll_page('RTX')
+    rtx = scroll_page('GPU')
     section(rtx, 'GPU 与并行')
     field(rtx, '解码方式', app.decode_var,
           ['NVIDIA CUDA（推荐）', 'CPU 解码'], key='decode')
-    note(rtx, '无效果片段直接硬件转码；调色片段先在 GPU 缩到交付尺寸再处理。导出转场保留原算法。')
+    note(rtx, '按检测结果使用 NVENC、AMD AMF 或 Intel QSV。AMF / QSV 使用兼容解码，预览仍可使用 D3D11 硬件解码。')
     split_control = field(rtx, '多 NVENC 分帧', app.split_var,
                           ['驱动自动选择', '关闭'], key='split')
     auto_parallel=tk.Checkbutton(rtx,text='自动安排并行（推荐）',variable=ws.delivery_auto_parallel_var,
@@ -347,7 +364,7 @@ def build_delivery_panel(workspace, delivery_frame):
                    bg=PANEL, fg=INK, selectcolor=INPUT, activebackground=PANEL,
                    activeforeground=INK, font=FONT, anchor='w').pack(fill='x', padx=px(7), pady=px(8))
     field(advanced, '关键帧间隔 GOP（帧）', ws.delivery_gop_var)
-    field(advanced, 'B 帧（0–4）', ws.delivery_bframes_var)
+    field(advanced, 'B 帧（0–4）', ws.delivery_bframes_var, key='bframes')
     field(advanced, 'NVENC 调优', ws.delivery_tune_var, ['hq', 'll', 'ull', 'lossless'], key='tune')
     field(advanced, '多重分析', ws.delivery_multipass_var,
           ['自动（随预设）', 'disabled', 'qres', 'fullres'], key='multipass')
@@ -359,11 +376,32 @@ def build_delivery_panel(workspace, delivery_frame):
         widget.configure(state=state if enabled else 'disabled')
 
     def refresh(*_):
-        cpu = ws.export_mode.get().startswith('CPU')
-        for key in ('codec', 'decode', 'split', 'tune', 'multipass', 'gpu'):
-            set_enabled(key, not cpu)
-        set_enabled('auto_parallel',not cpu)
-        set_enabled('parallel',cpu or not ws.delivery_auto_parallel_var.get())
+        forced_cpu = ws.export_mode.get().startswith('CPU')
+        try:
+            selected_codec = 'libx264' if forced_cpu else codec_from_label(app.codec_var.get())
+        except ValueError:
+            selected_codec = ''
+        vendor = encoder_vendor(selected_codec)
+        cpu = vendor == 'cpu'
+        nvenc = vendor == 'nvidia'
+        caps = vars(app).get('caps')
+        if caps is not None:
+            choices = [label for label in CODECS if codec_from_label(label) in available_codecs(caps)]
+            controls['codec'][0].configure(values=choices)
+        set_enabled('codec', not forced_cpu)
+        for key in ('decode', 'tune', 'multipass', 'gpu'):
+            set_enabled(key, nvenc)
+        set_enabled('bframes', vendor != 'amd')
+        split_capable = bool(nvenc and caps and selected_codec in getattr(caps, 'split_encode', set())
+                             and getattr(getattr(caps, 'gpu_profile', None), 'nvenc_engines', 0) > 1)
+        set_enabled('split', split_capable)
+        can_auto_parallel = nvenc and app.decode_var.get().startswith('NVIDIA')
+        if not can_auto_parallel and ws.delivery_auto_parallel_var.get():
+            ws.delivery_auto_parallel_var.set(False)
+        if vendor == 'amd' and ws.delivery_bframes_var.get() != '0':
+            ws.delivery_bframes_var.set('0')
+        set_enabled('auto_parallel', can_auto_parallel)
+        set_enabled('parallel', not can_auto_parallel or not ws.delivery_auto_parallel_var.get())
         bitrate_selected = bool(ws.bitrate_var.get().strip())
         set_enabled('quality', not bitrate_selected)
         quality_title.set(f'质量 {"CRF" if cpu else "CQ"}（0–51，越低越清晰）')
@@ -371,7 +409,7 @@ def build_delivery_panel(workspace, delivery_frame):
             '当前使用目标码率；清空目标码率后使用质量数值。' if bitrate_selected else
             '当前使用恒定质量；文件大小随画面复杂度变化。') +
             ('\nCPU 预设按所选速度映射，10-bit 保留。' if cpu else
-             '\nH.264 NVENC 使用 8-bit；10-bit 请选择 HEVC / AV1。'))
+             '\nH.264 硬件编码使用 8-bit；10-bit 请选择已验证可用的 HEVC / AV1。'))
         audio_codec = AUDIO_FORMATS.get(ws.delivery_audio_format_var.get(), 'aac')
         set_enabled('audio_bitrate', audio_codec == 'aac')
         set_enabled('audio_rate', audio_codec not in {'copy', 'none'})
@@ -383,8 +421,6 @@ def build_delivery_panel(workspace, delivery_frame):
                        audio_codec, 'PCM 无损音频需要 MOV / MKV 容器，码率由位深和采样率决定。')
         incompatible = (audio_codec.startswith('pcm_') and suffix == '.mp4') or (audio_codec == 'flac' and suffix != '.mkv')
         audio_note.configure(text=message, fg='#ed8e85' if incompatible else MUTED)
-        caps = vars(app).get('caps')
-        split_capable = bool(caps and getattr(caps, 'split_encode', set()) & {'hevc_nvenc', 'av1_nvenc'})
         engines = getattr(getattr(caps, 'gpu_profile', None), 'nvenc_engines', 0)
         choices = ['驱动自动选择', '关闭']
         if split_capable and engines > 1:
@@ -394,10 +430,11 @@ def build_delivery_panel(workspace, delivery_frame):
             choices.insert(0, current)
         split_control.configure(values=choices)
         split_note.configure(text='分帧适用于支持此功能的 HEVC / AV1；并行任务会增加显存占用。' if split_capable else
-                             '正在检测或当前编码器无分帧支持；自动模式由驱动安排。并行任务可独立设置。')
+                             '当前编码器不使用多 NVENC 分帧。AMD / Intel 默认单任务，手动并行会增加内存和显存占用。')
 
     for variable in (ws.export_mode, ws.bitrate_var, ws.delivery_audio_format_var,
-                     ws.delivery_container_var, app.split_var,ws.delivery_auto_parallel_var):
+                     ws.delivery_container_var, app.split_var,ws.delivery_auto_parallel_var,
+                     app.codec_var, app.decode_var):
         variable.trace_add('write', refresh)
     refresh()
     ws.delivery_tabs.bind('<<NotebookTabChanged>>', refresh, add='+')
