@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -86,10 +87,13 @@ from multicam_ui import MulticamWorkspace
 from cache_paths import cache_dir, initialize_cache_policy
 from cache_publish import publish_completed
 from proxy_cache import register_proxy
+from studio_integration import StudioIntegrationMixin
+from lossless_workspace import LosslessWorkspace
+from editor_core import build_proxy_encode_command, proxy_format_labels, resolve_proxy_format
 
 
 APP_NAME = "RTX 视频渲染工坊"
-APP_VERSION = "5.9.1"
+APP_VERSION = "5.12.0"
 BG = "#18191b"
 SURFACE = "#202124"
 PANEL = "#242629"
@@ -146,7 +150,7 @@ def asset_path(name: str) -> Path:
     return base / "assets" / name
 
 
-class ExporterApp(tk.Tk):
+class ExporterApp(StudioIntegrationMixin, tk.Tk):
     def __init__(self) -> None:
         selected_cache_root = initialize_cache_policy()
         super().__init__()
@@ -192,6 +196,7 @@ class ExporterApp(tk.Tk):
         self.editor_current_time = 0.0
         self.editor_dragging = False
         self.editor_poll_busy = False
+        self.editor_load_generation = 0
         self.editor_join_files: list[str] = []
         self.editor_join_alignments: dict[str, AlignmentResult] = {}
         self.editor_join_alignment_audio = ""
@@ -216,7 +221,11 @@ class ExporterApp(tk.Tk):
 
         self._create_variables()
         self._configure_style()
+        self.lossless_workspace = LosslessWorkspace(self)
+        from studio_project import app_directory as project_app_directory
+        self.workspace_layout_path = project_app_directory() / 'workspace-layout.json'
         self._build_ui()
+        self._init_studio_integration()
         self._log(f'缓存目录：{selected_cache_root}；默认临时文件、代理与模型存放于此。')
         if os.name == "nt":
             self.after(0, lambda: self.state("zoomed"))
@@ -297,6 +306,7 @@ class ExporterApp(tk.Tk):
         self.editor_join_shared_settings_var = tk.StringVar(value="沿用“导出与 RTX”页设置")
         self.editor_split_mode_var = tk.StringVar(value="FLAC 无损（推荐）")
         self.editor_split_dir_var = tk.StringVar()
+        self.editor_proxy_format_var = tk.StringVar(value=proxy_format_labels()[0])
         self.editor_proxy_dir_var = tk.StringVar()
         self.editor_proxy_parallel_var = tk.StringVar(value="同时 1 路（检测中）")
         self.editor_proxy_count_var = tk.StringVar(value="队列 0 个")
@@ -559,6 +569,7 @@ class ExporterApp(tk.Tk):
         self.page_title_var = tk.StringVar(value="多机位剪辑")
         tk.Label(top, textvariable=self.page_title_var, bg=SURFACE, fg=MUTED,
                  font=(UI_FONT, 9)).pack(side="left")
+        self._build_studio_menu(top)
         self.export_button = ttk.Button(top, text="交付 / 导出", style="Accent.TButton", command=self._context_export)
         self.export_button.pack(side="right")
         self.ffmpeg_chip = tk.Label(top, text="FFmpeg…", bg=SURFACE, fg=MUTED, font=(UI_FONT, 8))
@@ -764,6 +775,11 @@ class ExporterApp(tk.Tk):
         self._build_join_panel(join_panel)
         self._build_split_panel(split_panel)
         self._build_proxy_panel(proxy_panel)
+        self.editor_toolbox = toolbox
+        self.editor_proxy_panel = proxy_panel
+        self.lossless_panel = tk.Frame(toolbox, bg=PANEL_ALT)
+        toolbox.add(self.lossless_panel, text="  无损分段  ")
+        self.lossless_workspace.build(self.lossless_panel)
         self.after_idle(self._set_initial_editor_pane_size)
 
         timeline_panel = tk.Frame(
@@ -2127,6 +2143,11 @@ class ExporterApp(tk.Tk):
                  "1080p · 原帧率/时长/时间码 · AAC 320k · CQ 19 · P2",
             bg=PANEL, fg=TEXT, font=(UI_FONT, 9), justify="left",
         ).pack(anchor="w", pady=(6, 0))
+        format_row = tk.Frame(panel, bg=PANEL_ALT)
+        format_row.pack(fill="x", pady=6)
+        tk.Label(format_row, text="代理格式", bg=PANEL_ALT, fg=TEXT).pack(side="left")
+        ttk.Combobox(format_row, textvariable=self.editor_proxy_format_var,
+                     values=proxy_format_labels(), state="readonly", width=44).pack(side="right")
         self._editor_path_field(panel, "代理输出目录", self.editor_proxy_dir_var, self._choose_proxy_directory)
 
         parallel = tk.Frame(panel, bg=PANEL_ALT)
@@ -2330,6 +2351,8 @@ class ExporterApp(tk.Tk):
         self._load_editor_video(path)
 
     def _load_editor_video(self, path: str) -> None:
+        self._invalidate_editor_player()
+        generation = self.editor_load_generation
         self.editor_join_preview_context = None
         self.editor_video_var.set(path)
         source = Path(path)
@@ -2341,21 +2364,35 @@ class ExporterApp(tk.Tk):
         self.mpv_path = mpv_path
 
         def worker() -> None:
-            controller: MpvController | None = self.mpv
+            controller: MpvController | None = None
             try:
                 if not mpv_path:
                     raise RuntimeError("未找到 mpv.exe。请把 Windows 版 mpv.exe 放入软件的 bin 文件夹。")
                 if not self.caps.ffprobe_path:
                     raise RuntimeError("未找到 ffprobe.exe。")
                 info = probe_media(self.caps.ffprobe_path, path)
+                if generation != self.editor_load_generation:
+                    return
                 if controller is None or not controller.process or controller.process.poll() is not None:
                     controller = MpvController(mpv_path, window_id)
                     controller.start()
                 playback_backend = controller.load(path)
-                self.events.put(("editor_loaded", (controller, info, playback_backend)))
+                if generation != self.editor_load_generation or getattr(self, '_closing', False):
+                    controller.stop()
+                    return
+                self.events.put(("editor_loaded", (generation, controller, info, playback_backend)))
             except Exception as exc:
-                self.events.put(("editor_error", str(exc)))
+                if controller is not None:
+                    controller.stop()
+                if generation == self.editor_load_generation:
+                    self.events.put(("editor_error", str(exc)))
         threading.Thread(target=worker, daemon=True).start()
+
+    def _invalidate_editor_player(self) -> None:
+        self.editor_load_generation += 1
+        controller, self.mpv = self.mpv, None
+        if controller is not None:
+            threading.Thread(target=controller.stop, daemon=True).start()
 
     def _choose_editor_audio(self) -> None:
         path = filedialog.askopenfilename(title="选择替换音频", filetypes=[
@@ -3603,6 +3640,7 @@ class ExporterApp(tk.Tk):
         if self.working:
             return
         sources = list(self.editor_proxy_files)
+        proxy_format = resolve_proxy_format(self.editor_proxy_format_var.get()).key
         output_dir = self.editor_proxy_dir_var.get().strip()
         if not sources:
             messagebox.showerror(APP_NAME, "请先点击“添加多个视频”，把需要代理的原片加入列表。")
@@ -3628,7 +3666,7 @@ class ExporterApp(tk.Tk):
             return
         folder = Path(output_dir)
         folder.mkdir(parents=True, exist_ok=True)
-        source_conflicts = proxy_source_conflicts(sources, folder)
+        source_conflicts = proxy_source_conflicts(sources, folder, proxy_format)
         if source_conflicts:
             messagebox.showerror(
                 APP_NAME,
@@ -3636,7 +3674,7 @@ class ExporterApp(tk.Tk):
                 "请新建或选择独立的 ProxyMedia 文件夹。",
             )
             return
-        outputs = [proxy_output_path(source, folder) for source in sources]
+        outputs = [proxy_output_path(source, folder, proxy_format) for source in sources]
         existing = [output for output in outputs if output.exists()]
         if existing and not messagebox.askyesno(
             APP_NAME, f"代理文件夹中已有 {len(existing)} 个同名代理，是否覆盖并继续其余任务？",
@@ -3660,11 +3698,11 @@ class ExporterApp(tk.Tk):
             def encode_one(source: str, output: Path) -> tuple[str, str | None]:
                 if self.cancel_event.is_set():
                     return str(output), "任务已取消"
+                pending = output.with_name(f'.{output.stem}.okk-{uuid.uuid4().hex}{output.suffix}')
                 try:
                     media = probe_media(self.caps.ffprobe_path or "ffprobe", source)
-                    settings = make_1080p_proxy_settings(media, self.caps.cuda_decode)
-                    command = build_encode_command(
-                        self.caps.ffmpeg_path or "ffmpeg", source, str(output), settings, media, self.caps,
+                    command = build_proxy_encode_command(
+                        self.caps.ffmpeg_path or "ffmpeg", source, str(pending), media, self.caps, proxy_format,
                     )
                     self.events.put(("log", "代理命令：" + quote_command(command)))
                     recent_rate = RollingProgressRate()
@@ -3685,8 +3723,11 @@ class ExporterApp(tk.Tk):
                     code, details = self._run_editor_process(command, report_progress)
                     if self.cancel_event.is_set():
                         return str(output), "任务已取消"
-                    if code or not output.is_file() or output.stat().st_size <= 0:
+                    if code or not pending.is_file() or pending.stat().st_size <= 0:
                         return str(output), details[-1600:] or f"FFmpeg 返回错误码 {code}"
+                    from proxy_media import validate_proxy_media
+                    validate_proxy_media(self.caps.ffprobe_path, source, str(pending), media.duration, media.fps)
+                    publish_completed(pending, output, cancel_event=self.cancel_event)
                     try:
                         registered = register_proxy(source, str(output))
                     except Exception:
@@ -3696,6 +3737,8 @@ class ExporterApp(tk.Tk):
                     return str(output), None
                 except Exception as exc:
                     return str(output), str(exc)
+                finally:
+                    pending.unlink(missing_ok=True)
 
             with ThreadPoolExecutor(max_workers=parallel_count) as executor:
                 future_map = {
@@ -3707,7 +3750,7 @@ class ExporterApp(tk.Tk):
                     try:
                         output, error = future.result()
                     except Exception as exc:
-                        output, error = str(proxy_output_path(source, folder)), str(exc)
+                        output, error = str(proxy_output_path(source, folder, proxy_format)), str(exc)
                     completed += 1
                     if error:
                         failures.append((Path(source).name, error))
@@ -4214,6 +4257,9 @@ class ExporterApp(tk.Tk):
         ])
         if not path:
             return
+        self._set_input_video(path)
+
+    def _set_input_video(self, path: str) -> None:
         self.input_var.set(path)
         source = Path(path)
         self.output_var.set(str(source.with_name(f"{source.stem}_RTX_HEVC.mp4")))
@@ -4602,8 +4648,12 @@ class ExporterApp(tk.Tk):
         try:
             while True:
                 kind, payload = self.events.get_nowait()
+                if self._handle_studio_event(kind, payload):
+                    continue
                 if kind == "caps":
                     self.caps = payload  # type: ignore[assignment]
+                    if self.media_pool_workspace is not None:
+                        self.media_pool_workspace.on_capabilities()
                     codecs = ", ".join(sorted(self.caps.nvenc_codecs)) or "无 NVENC"
                     self.ffmpeg_status_var.set(f"{Path(self.caps.ffmpeg_path).name if self.caps.ffmpeg_path else '未找到'}  |  {codecs}")
                     self._apply_gpu_profile()
@@ -4642,9 +4692,17 @@ class ExporterApp(tk.Tk):
                                 "拖动顶部时间标尺横移 · Ctrl+滚轮缩放 · Shift+滚轮横移"
                             )
                 elif kind == "editor_loaded":
-                    controller, info, playback_backend = payload  # type: ignore[misc]
+                    if len(payload) == 4:
+                        generation, controller, info, playback_backend = payload
+                        if generation != self.editor_load_generation:
+                            threading.Thread(target=controller.stop, daemon=True).start()
+                            continue
+                    else:
+                        controller, info, playback_backend = payload  # legacy aligned preview
                     self.mpv = controller
                     self.editor_media = info
+                    if self.lossless_workspace.state.source != info.path:
+                        self.lossless_workspace.open_media(info.path)
                     self.after_idle(self._resize_editor_preview_surface)
                     self.editor_duration = float(info.duration or 0)
                     self.editor_current_time = 0.0
@@ -4672,6 +4730,7 @@ class ExporterApp(tk.Tk):
                     current, duration, _paused = payload  # type: ignore[misc]
                     self.editor_poll_busy = False
                     self.editor_current_time = max(0.0, float(current))
+                    self.lossless_workspace.on_player_time(self.editor_current_time)
                     self.editor_duration = max(0.0, float(duration))
                     if not self.editor_dragging and self.editor_duration > 0:
                         self.editor_timeline_var.set(self.editor_current_time / self.editor_duration * 1000.0)
@@ -4961,8 +5020,14 @@ class ExporterApp(tk.Tk):
     def _close(self) -> None:
         if self.working and not messagebox.askyesno(APP_NAME, "任务仍在进行。确定取消并退出吗？"):
             return
-        if not self.multicam_workspace.request_close():
+        if not self._project_confirm_discard():
             return
+        self._write_project_autosave()
+        self._closing = True
+        self._invalidate_editor_player()
+        self.lossless_workspace.close()
+        if self.media_pool_workspace is not None:
+            self.media_pool_workspace.close()
         self.multicam_workspace.close()
         self._cancel()
         if self.mpv:

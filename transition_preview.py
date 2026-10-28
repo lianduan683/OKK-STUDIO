@@ -32,14 +32,14 @@ def transition_signature(project) -> str:
     for name in ('master_audio', 'range_start', 'range_end','alignment_reference_camera','color_reference_camera'):
         payload.pop(name, None)
     for clip in payload.get('clips',[]):
-        for name in ('camera_make','camera_model','camera_metadata_source'):
+        for name in ('camera_make','camera_model','camera_metadata_source','proxy_path'):
             clip.pop(name,None)
     paths = set()
 
     def collect(value):
         if isinstance(value, dict):
             for key, item in value.items():
-                if key in {'path', 'lut_path', 'output_path', 'stabilized_path', 'cache_path'} and isinstance(item, str) and item:
+                if key in {'path', 'lut_path', 'output_path', 'stabilized_path', 'cache_path', 'mask_path', 'asset_path'} and isinstance(item, str) and item:
                     paths.add(item)
                 else:
                     collect(item)
